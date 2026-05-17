@@ -13,3 +13,12 @@ class RateLimitException(TradingBaseException):
 class SchemaValidationException(TradingBaseException):
     """Raised when incoming exchange payloads fail Pydantic validation."""
     pass
+
+class InsufficientFundsException(TradingBaseException):
+    """Raised when the Binance account has insufficient balance for an order."""
+    pass
+
+class CriticalExecutionException(TradingBaseException):
+    """Raised when a critical error (such as invalid API key, IP, or permissions) is encountered."""
+    pass
+

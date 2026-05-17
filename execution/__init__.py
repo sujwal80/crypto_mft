@@ -1,7 +1,3 @@
-"""
-Compatibility module. Imports and re-exports classes from the modular files.
-"""
-
 from .dead_letter_queue import DeadLetterQueue
 from .binance_execution_gateway import BinanceExecutionGateway
 from .risk_guardrail_engine import RiskGuardrailEngine

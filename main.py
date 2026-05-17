@@ -12,11 +12,15 @@ from dotenv import load_dotenv
 # Load local environment variables from .env file
 load_dotenv()
 
+from core.exceptions import TradingBaseException
 from core.schemas import InternalTick
 from ingestion.binance_adapter import BinanceCryptoAdapter
 from perception.feature_store import FeatureStore
 from intelligence.alpha_engine import AlphaModel, PortfolioOptimizer, OrderGenerator
-from execution.risk_critic import DeadLetterQueue, BinanceExecutionGateway, RiskGuardrailEngine, OrderManagementSystem
+from execution.dead_letter_queue import DeadLetterQueue
+from execution.binance_execution_gateway import BinanceExecutionGateway
+from execution.risk_guardrail_engine import RiskGuardrailEngine
+from execution.order_management_system import OrderManagementSystem
 
 # Configure UTF-8 encoding for standard streams to prevent Windows crash on emojis
 if sys.platform.startswith('win'):
@@ -164,7 +168,8 @@ async def trading_supervisor_loop(
             queue.task_done()
     finally:
         logger.critical("Supervisor loop exiting. Triggering fail-safe auto-sell liquidation...")
-        await oms.liquidate_all(current_inventory)
+        journal_path = os.path.join(PROJECT_DIR, "trades_journal.json")
+        await oms.liquidate_all(current_inventory, average_entry_price, journal_path)
         
 # ======================================================================
 # Application Entry Point
@@ -195,13 +200,11 @@ async def main():
     # Initialize Subsystems across all Domains
     binance_adapter = BinanceCryptoAdapter(symbol=SYMBOL, wss_url=BINANCE_WSS_URL, rest_url=BINANCE_REST_URL)
     feature_store = FeatureStore(window_size=1000)
-    # alpha_model = AlphaModel(model_path="/usr/local/google/home/singhujwal/mft_project/weights.lgb")
     alpha_model_path = os.path.join(PROJECT_DIR, "weights.lgb")
     alpha_model = AlphaModel(model_path=alpha_model_path)
     optimizer = PortfolioOptimizer()
     order_generator = OrderGenerator()
     
-    # dlq = DeadLetterQueue(journal_path="/usr/local/google/home/singhujwal/mft_project/dlq_audit.json")
     dlq_path = os.path.join(PROJECT_DIR, "dlq_audit.json")
     dlq = DeadLetterQueue(journal_path=dlq_path)
     risk_critic = RiskGuardrailEngine(dlq=dlq, max_drawdown_limit=0.05)
@@ -240,4 +243,10 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Trading system shutdown cleanly by user.")
+    except TradingBaseException as tbe:
+        logger.critical(f"🛑 FATAL TRADING PIPELINE ERROR: {tbe}")
+        sys.exit(1)
+    except Exception as e:
+        logger.critical(f"🛑 UNEXPECTED SYSTEM ERROR: {e}")
+        sys.exit(1)
 

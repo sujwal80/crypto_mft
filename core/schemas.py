@@ -1,5 +1,6 @@
-from typing import List
-from pydantic import BaseModel, Field
+from typing import List, Any
+
+from pydantic import BaseModel, Field, model_validator
 
 class InternalTick(BaseModel):
     """Unified internal tick structure representing normalized market data across all exchanges."""
@@ -11,8 +12,6 @@ class InternalTick(BaseModel):
     ask_size: float = Field(..., description="Best ask volume")
     timestamp_ns: int = Field(..., description="Epoch timestamp in nanoseconds")
 
-from pydantic import BaseModel, Field, model_validator
-from typing import List, Any
 
 class BinanceDepthEntry(BaseModel):
     price: str
