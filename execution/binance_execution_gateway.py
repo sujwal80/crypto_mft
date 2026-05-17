@@ -39,7 +39,9 @@ class BinanceExecutionGateway:
         action = order_payload.get("action")
         notional = order_payload.get("notional", 0.0)
         limit_price = order_payload.get("limit_price", 0.0)
-        
+        order_type = order_payload.get("type", "limit")
+        is_market_order = (order_type == "market") or (limit_price == 0.0)
+
         if self.paper_trading or not self.exchange:
             logger.info(f"Gateway routing order to Binance (Paper Trading: {self.paper_trading})...")
             await asyncio.sleep(0.01) # Simulating 10ms execution network latency
@@ -47,7 +49,7 @@ class BinanceExecutionGateway:
                 "order_id": f"PAPER_{int(time.time() * 1000)}",
                 "symbol": symbol,
                 "action": action,
-                "executed_price": limit_price,
+                "executed_price": limit_price,  # 0.0 for market orders in paper mode
                 "executed_qty": notional,
                 "status": "FILLED",
                 "execution_timestamp": int(time.time() * 1e9)
@@ -55,25 +57,35 @@ class BinanceExecutionGateway:
         else:
             logger.warning(f"⚠️ LIVE EXECUTION ROUTING -> Sending {action} {notional} {symbol} to Binance!")
             try:
-                # Calculate quantity based on notional and limit price
-                quantity = notional / limit_price
-                
-                # Execute live limit order via CCXT Pro
-                order = await self.exchange.create_order(
-                    symbol=symbol,
-                    type='limit',
-                    side=action.lower(),
-                    amount=quantity,
-                    price=limit_price
+                if is_market_order:
+                    # BUG-04 FIX: Fetch current price for market orders to compute quantity
+                    ticker = await self.exchange.fetch_ticker(symbol)
+                    current_price = ticker.get('last') or ticker.get('bid') or 0.0
+                    if current_price <= 0:
+                        raise ValueError(f"Cannot compute quantity: invalid market price {current_price} for {symbol}")
+                    quantity = notional / current_price
+                    order = await self.exchange.create_order(
+                        symbol=symbol, type='market', side=action.lower(), amount=quantity
                     )
-                
+                else:
+                    if limit_price <= 0:
+                        raise ValueError(f"Cannot compute quantity: limit_price is {limit_price}")
+                    quantity = notional / limit_price
+                    order = await self.exchange.create_order(
+                        symbol=symbol, type='limit', side=action.lower(),
+                        amount=quantity, price=limit_price
+                    )
+
+                # BUG-05 FIX: filled is in base asset (BTC); avg_fill_price converts to notional (USD)
+                filled_base_qty = order.get('filled', 0.0)
+                avg_fill_price = order.get('average') or limit_price
                 logger.info(f"LIVE ORDER PLACED SUCCESSFULLY -> Order ID: {order['id']}")
                 return {
                     "order_id": order['id'],
                     "symbol": symbol,
                     "action": action,
-                    "executed_price": order.get('average', limit_price),
-                    "executed_qty": order.get('filled', quantity) * limit_price,
+                    "executed_price": avg_fill_price,
+                    "executed_qty": filled_base_qty * avg_fill_price,  # Notional USD value
                     "status": order.get('status', 'FILLED').upper(),
                     "execution_timestamp": int(time.time() * 1e9)
                 }
@@ -84,3 +96,4 @@ class BinanceExecutionGateway:
     async def close(self):
         if self.exchange:
             await self.exchange.close()
+

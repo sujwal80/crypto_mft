@@ -9,12 +9,18 @@ Risk Guardrail Engine (The Critic)
 """
 class RiskGuardrailEngine:
     """Enforces zero-tolerance deterministic risk checks (Maker-Critic architecture)."""
-    def __init__(self, dlq: DeadLetterQueue, max_drawdown_limit: float = 0.05):
+    def __init__(self, dlq: DeadLetterQueue, max_drawdown_limit: float = 0.05, initial_portfolio_value: float = 10000.0):
         self.dlq = dlq
         self.max_drawdown_limit = max_drawdown_limit
-        self.daily_peak_value = 100000.0
-        self.current_portfolio_value = 100000.0
+        self.daily_peak_value = initial_portfolio_value
+        self.current_portfolio_value = initial_portfolio_value
     
+    def update_portfolio_value(self, new_value: float):
+        """Called after every trade fill to keep the drawdown circuit breaker accurate."""
+        self.current_portfolio_value = new_value
+        if new_value > self.daily_peak_value:
+            self.daily_peak_value = new_value  # Ratchet up the peak
+
     """
     Validate Proposed Order
     """
@@ -32,3 +38,4 @@ class RiskGuardrailEngine:
             return False
             
         return True
+

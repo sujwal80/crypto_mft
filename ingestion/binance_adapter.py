@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import time
 from typing import Optional
 import aiohttp
 import websockets
@@ -62,7 +63,6 @@ class BinanceCryptoAdapter(DataFeedAdapter):
                             ask_size = float(payload.A)
                             
                             # Normalize Timestamp to Epoch Nanoseconds (bookTicker has no E, so use current time)
-                            import time
                             timestamp_ns = time.time_ns()
                             
                             internal_tick = InternalTick(

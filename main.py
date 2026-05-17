@@ -62,114 +62,127 @@ async def trading_supervisor_loop(
         while True:
             # Phase 1: Ingestion (Get Normalized Tick)
             tick: InternalTick = await queue.get()
-            logger.debug(f"Supervisor ingested tick: {tick.symbol} @ {tick.bid}x{tick.ask}")
-    
-            # Phase 2: Perception (Update LOB & Compute Features)
-            features = feature_store.process_tick(tick)
-            if features is None:
-                queue.task_done()
-                continue # Warming up feature windows
-                
-            logger.debug(f"Phase 2 [Perception] Feature Vector computed: {features}")
-            
-            # Phase 3: Intelligence (Predict Alpha & Size Position)
-            alpha_forecast = alpha_model.predict(features)
-            target_weight = optimizer.calculate_target_weight(alpha_forecast)
-            logger.debug(f"Phase 3 [Intelligence] Alpha Forecast: {alpha_forecast:.6f} | Target Weight: {target_weight:.2%}")
-            
-            # Generate Rebalancing Orders
-            current_holding = current_inventory.get(tick.symbol, 0.0)
-            proposed_order = order_generator.generate_order(
-                symbol=tick.symbol,
-                target_weight=target_weight,
-                current_inventory=current_holding,
-                portfolio_value=portfolio_value,
-                bid=tick.bid,
-                ask=tick.ask
-            )
-            
-            if proposed_order:
-                mid_price = (tick.bid + tick.ask) / 2.0
-                logger.info(f"Phase 3 [Intelligence] Proposed Order -> {proposed_order}")
-                
-                # Phase 4: Execution & Risk Guardrails (Maker-Critic)
-                is_approved = risk_critic.validate_order(proposed_order, mid_price)
-                
-                if is_approved:
-                    logger.info("Phase 4 [Critic] Order Approved by Guardrails. Sending to OMS...")
-                    execution_report = await oms.process_approved_order(proposed_order)
+            try:
+                logger.debug(f"Supervisor ingested tick: {tick.symbol} @ {tick.bid}x{tick.ask}")
+        
+                # Phase 2: Perception (Update LOB & Compute Features)
+                features = feature_store.process_tick(tick)
+                if features is None:
+                    continue # Warming up feature windows
                     
-                    if execution_report and execution_report.get("status") == "FILLED":
-                        # Update Portfolio Inventory State
-                        action = execution_report["action"]
-                        notional = execution_report["executed_qty"]
-                        exec_price = execution_report.get("executed_price", proposed_order.get("limit_price", 0.0))
+                logger.debug(f"Phase 2 [Perception] Feature Vector computed: {features}")
+                
+                # Phase 3: Intelligence (Predict Alpha & Size Position)
+                alpha_forecast = alpha_model.predict(features)
+                target_weight = optimizer.calculate_target_weight(alpha_forecast)
+                logger.debug(f"Phase 3 [Intelligence] Alpha Forecast: {alpha_forecast:.6f} | Target Weight: {target_weight:.2%}")
+                
+                # Generate Rebalancing Orders
+                current_holding = current_inventory.get(tick.symbol, 0.0)
+                proposed_order = order_generator.generate_order(
+                    symbol=tick.symbol,
+                    target_weight=target_weight,
+                    current_inventory=current_holding,
+                    portfolio_value=portfolio_value,
+                    bid=tick.bid,
+                    ask=tick.ask
+                )
+                
+                if proposed_order:
+                    mid_price = (tick.bid + tick.ask) / 2.0
+                    logger.info(f"Phase 3 [Intelligence] Proposed Order -> {proposed_order}")
+                    
+                    # Phase 4: Execution & Risk Guardrails (Maker-Critic)
+                    is_approved = risk_critic.validate_order(proposed_order, mid_price)
+                    
+                    if is_approved:
+                        logger.info("Phase 4 [Critic] Order Approved by Guardrails. Sending to OMS...")
+                        execution_report = await oms.process_approved_order(proposed_order)
                         
-                        trade_pnl = 0.0
-                        
-                        trade_notional = notional if action == "BUY" else -notional
-                        old_notional = current_inventory[tick.symbol]
-                        new_notional = old_notional + trade_notional
-                        old_avg = average_entry_price[tick.symbol]
-                        
-                        if abs(old_notional) < 0.01:
-                            # Opening fresh position
-                            average_entry_price[tick.symbol] = exec_price
+                        if execution_report and execution_report.get("status") == "FILLED":
+                            # Update Portfolio Inventory State
+                            action = execution_report["action"]
+                            notional = execution_report["executed_qty"]
+                            exec_price = execution_report.get("executed_price", proposed_order.get("limit_price", 0.0))
+                            
                             trade_pnl = 0.0
-                        elif (old_notional > 0 and trade_notional > 0) or (old_notional < 0 and trade_notional < 0):
-                            # Adding to existing position (same sign)
-                            average_entry_price[tick.symbol] = ((abs(old_notional) * old_avg) + (notional * exec_price)) / abs(new_notional)
-                            trade_pnl = 0.0
-                        else:
-                            # Reducing or flipping position
-                            if notional <= abs(old_notional):
-                                # Reducing position
-                                qty_closed = notional / exec_price if exec_price > 0 else 0.0
-                                direction = 1 if old_notional > 0 else -1
-                                trade_pnl = (exec_price - old_avg) * qty_closed * direction
-                                # average_entry_price stays the same
-                            else:
-                                # Flipping position
-                        
-                                qty_closed = abs(old_notional) / exec_price if exec_price > 0 else 0.0
-                                direction = 1 if old_notional > 0 else -1
-                                trade_pnl = (exec_price - old_avg) * qty_closed * direction
-                                
-                                # The remaining notional establishes the new entry price
+                            
+                            trade_notional = notional if action == "BUY" else -notional
+                            old_notional = current_inventory[tick.symbol]
+                            new_notional = old_notional + trade_notional
+                            old_avg = average_entry_price[tick.symbol]
+                            
+                            if abs(old_notional) < 0.01:
+                                # Opening fresh position
                                 average_entry_price[tick.symbol] = exec_price
-                        
-                        realized_pnl += trade_pnl
-                        current_inventory[tick.symbol] = new_notional
-                        
-                        # Prevent floating point drift around 0
-                        if abs(current_inventory[tick.symbol]) < 0.01:
-                            current_inventory[tick.symbol] = 0.0
-                            average_entry_price[tick.symbol] = 0.0
-                                
-                        logger.info(f"Portfolio Inventory Updated -> {current_inventory} | Realized PnL: ${realized_pnl:.2f}")
-                        
-                        journal_entry = {
-                            "timestamp": datetime.now().isoformat(),
-                            "symbol": tick.symbol,
-                            "action": action,
-                            "executed_price": exec_price,
-                            "executed_notional": notional,
-                            "trade_pnl": trade_pnl,
-                            "cumulative_pnl": realized_pnl
-                        }
-                        journal_path = os.path.join(PROJECT_DIR, "trades_journal.json")
-                        try:
-                            with open(journal_path, "a") as f:
-                                f.write(json.dumps(journal_entry) + "\n")
-                        except Exception as e:
-                            logger.error(f"Failed to write to trades journal: {e}")
-                else:
-                    logger.warning("Phase 4 [Critic] Order Rejected. Check DLQ audit journal.")
-            queue.task_done()
+                                trade_pnl = 0.0
+                            elif (old_notional > 0 and trade_notional > 0) or (old_notional < 0 and trade_notional < 0):
+                                # Adding to existing position (same sign)
+                                average_entry_price[tick.symbol] = ((abs(old_notional) * old_avg) + (notional * exec_price)) / abs(new_notional)
+                                trade_pnl = 0.0
+                            else:
+                                # Reducing or flipping position
+                                if notional <= abs(old_notional):
+                                    # Reducing position
+                                    qty_closed = notional / exec_price if exec_price > 0 else 0.0
+                                    direction = 1 if old_notional > 0 else -1
+                                    trade_pnl = (exec_price - old_avg) * qty_closed * direction
+                                else:
+                                    # Flipping position
+                                    qty_closed = abs(old_notional) / exec_price if exec_price > 0 else 0.0
+                                    direction = 1 if old_notional > 0 else -1
+                                    trade_pnl = (exec_price - old_avg) * qty_closed * direction
+                                    average_entry_price[tick.symbol] = exec_price
+                            
+                            realized_pnl += trade_pnl
+                            current_inventory[tick.symbol] = new_notional
+                            
+                            # Prevent floating point drift around 0
+                            if abs(current_inventory[tick.symbol]) < 0.01:
+                                current_inventory[tick.symbol] = 0.0
+                                average_entry_price[tick.symbol] = 0.0
+
+                            # BUG-06 FIX: Update risk critic with real portfolio value after every fill
+                            risk_critic.update_portfolio_value(portfolio_value + realized_pnl)
+                                    
+                            logger.info(f"Portfolio Inventory Updated -> {current_inventory} | Realized PnL: ${realized_pnl:.2f}")
+                            
+                            journal_entry = {
+                                "timestamp": datetime.now().isoformat(),
+                                "symbol": tick.symbol,
+                                "action": action,
+                                "executed_price": exec_price,
+                                "executed_notional": notional,
+                                "trade_pnl": trade_pnl,
+                                "cumulative_pnl": realized_pnl
+                            }
+                            journal_path = os.path.join(PROJECT_DIR, "trades_journal.json")
+                            try:
+                                with open(journal_path, "a") as f:
+                                    f.write(json.dumps(journal_entry) + "\n")
+                            except Exception as e:
+                                logger.error(f"Failed to write to trades journal: {e}")
+                    else:
+                        logger.warning("Phase 4 [Critic] Order Rejected. Check DLQ audit journal.")
+            finally:
+                # BUG-07 FIX: Always mark tick done, even if an exception fires mid-processing
+                queue.task_done()
     finally:
         logger.critical("Supervisor loop exiting. Triggering fail-safe auto-sell liquidation...")
+        
+        # Drain/empty the queue to release references and clean up resources
+        logger.info("Draining and clearing internal message queue...")
+        while not queue.empty():
+            try:
+                queue.get_nowait()
+                queue.task_done()
+            except asyncio.QueueEmpty:
+                break
+                
         journal_path = os.path.join(PROJECT_DIR, "trades_journal.json")
-        await oms.liquidate_all(current_inventory, average_entry_price, journal_path)
+        # BUG-09 FIX: Pass realized_pnl so liquidation journal entries show correct cumulative PnL
+        await oms.liquidate_all(current_inventory, average_entry_price, journal_path, realized_pnl)
+
         
 # ======================================================================
 # Application Entry Point
@@ -194,8 +207,8 @@ async def main():
         logger.critical("⚠️ LIVE TRADING ENABLED but BINANCE_API_KEY or BINANCE_API_SECRET is missing! Halting startup.")
         sys.exit(1)
         
-    # Initialize Core Async Queue
-    message_queue = asyncio.Queue()
+    # Initialize Core Async Queue — BUG-10 FIX: bounded to prevent unbounded memory growth
+    message_queue = asyncio.Queue(maxsize=1000)
     
     # Initialize Subsystems across all Domains
     binance_adapter = BinanceCryptoAdapter(symbol=SYMBOL, wss_url=BINANCE_WSS_URL, rest_url=BINANCE_REST_URL)
@@ -207,7 +220,11 @@ async def main():
     
     dlq_path = os.path.join(PROJECT_DIR, "dlq_audit.json")
     dlq = DeadLetterQueue(journal_path=dlq_path)
-    risk_critic = RiskGuardrailEngine(dlq=dlq, max_drawdown_limit=0.05)
+    risk_critic = RiskGuardrailEngine(
+        dlq=dlq,
+        max_drawdown_limit=0.05,
+        initial_portfolio_value=INITIAL_PORTFOLIO_VALUE  # BUG-06 FIX: seed with real portfolio value
+    )
     
     # Initialize Live Gateway
     gateway = BinanceExecutionGateway(
@@ -232,6 +249,8 @@ async def main():
                 portfolio_value=INITIAL_PORTFOLIO_VALUE
             )
         )
+    except TradingBaseException:
+        raise  # BUG-01 FIX: Let it propagate cleanly to __main__ handler after finally cleanup
     except asyncio.CancelledError:
         logger.info("Orchestrator received cancel signal.")
     finally:

@@ -36,7 +36,7 @@ def test_risk_guardrail_engine(tmp_path):
     journal_file = tmp_path / "test_dlq.json"
     dlq = DeadLetterQueue(journal_path=str(journal_file))
     
-    engine = RiskGuardrailEngine(dlq=dlq, max_drawdown_limit=0.05)
+    engine = RiskGuardrailEngine(dlq=dlq, max_drawdown_limit=0.05, initial_portfolio_value=100000.0)
     
     # Test valid order
     proposed_order = {"symbol": "BTCUSDT", "action": "BUY", "notional": 1000.0, "limit_price": 50000.0}
@@ -46,7 +46,7 @@ def test_risk_guardrail_engine(tmp_path):
     assert engine.validate_order(proposed_order, 40000.0) is False # > 2% deviation
     
     # Test drawdown circuit breaker
-    engine.current_portfolio_value = 90000.0 # 10% drawdown
+    engine.update_portfolio_value(90000.0)  # 10% drawdown from 100k peak
     assert engine.validate_order(proposed_order, 50000.0) is False
 
 @pytest.mark.asyncio

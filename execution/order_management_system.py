@@ -47,7 +47,7 @@ class OrderManagementSystem:
             err_msg = str(e).lower()
             if "insufficient balance" in err_msg or "insufficient funds" in err_msg:
                 raise InsufficientFundsException(f"Insufficient balance on Binance: {e}")
-            elif "invalid api-key" in err_msg or "ip" in err_msg or "permission" in err_msg:
+            elif "invalid api-key" in err_msg or "ip, or permissions" in err_msg or "permission" in err_msg:
                 raise CriticalExecutionException(f"Invalid API Key, IP Whitelisting, or API permissions: {e}")
                 
             return None
@@ -55,7 +55,7 @@ class OrderManagementSystem:
     """
     Fail-Safe Auto-Sell Liquidation (Flattening)
     """
-    async def liquidate_all(self, current_inventory: Dict[str, float], average_entry_price: Optional[Dict[str, float]] = None, journal_path: Optional[str] = None):
+    async def liquidate_all(self, current_inventory: Dict[str, float], average_entry_price: Optional[Dict[str, float]] = None, journal_path: Optional[str] = None, realized_pnl: float = 0.0):
         """Emergency safety routine. Liquidates all open positions to cash immediately upon shutdown or crash."""
         logger.critical("🚨 INITIATING FAIL-SAFE EMERGENCY LIQUIDATION (FLATTENING INVENTORY)...")
         
@@ -92,6 +92,7 @@ class OrderManagementSystem:
                         if journal_path:
                             from datetime import datetime
                             import json
+                            cumulative = realized_pnl + trade_pnl
                             journal_entry = {
                                 "timestamp": datetime.now().isoformat(),
                                 "symbol": symbol,
@@ -99,7 +100,7 @@ class OrderManagementSystem:
                                 "executed_price": exec_price,
                                 "executed_notional": executed_qty,
                                 "trade_pnl": trade_pnl,
-                                "cumulative_pnl": 0.0
+                                "cumulative_pnl": cumulative
                             }
                             try:
                                 with open(journal_path, "a") as f:
