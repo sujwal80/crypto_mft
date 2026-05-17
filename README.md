@@ -113,8 +113,8 @@ Live Production mode initializes a real `ccxt.pro` client. **It will execute rea
 ```powershell
 $env:BINANCE_API_KEY="<your_api_key>"
 $env:BINANCE_API_SECRET="<your_api_secret>"
-$env:PORTFOLIO_CASH_VALUE="5000.0"
-$env:PAPER_TRADING="false"
+$env:PORTFOLIO_CASH_VALUE="<your_portfolio_cash_value>"
+$env:PAPER_TRADING="<true/false>"
 
 python main.py
 ```
