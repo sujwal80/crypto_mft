@@ -4,31 +4,16 @@ import os
 import sys
 import time
 import json
-from datetime import datetime
-from typing import Dict
+from typing import Dict, Optional
 
-from dotenv import load_dotenv
-
-# Load local environment variables from .env file
-load_dotenv()
-
-from core.exceptions import TradingBaseException
 from core.schemas import InternalTick
 from ingestion.binance_adapter import BinanceCryptoAdapter
 from perception.feature_store import FeatureStore
 from intelligence.alpha_engine import AlphaModel, PortfolioOptimizer, OrderGenerator
 from execution.dead_letter_queue import DeadLetterQueue
-from execution.binance_execution_gateway import BinanceExecutionGateway
-from execution.risk_guardrail_engine import RiskGuardrailEngine
-from execution.order_management_system import OrderManagementSystem
-
-# Configure UTF-8 encoding for standard streams to prevent Windows crash on emojis
-if sys.platform.startswith('win'):
-    try:
-        sys.stdout.reconfigure(encoding='utf-8')
-        sys.stderr.reconfigure(encoding='utf-8')
-    except Exception:
-        pass
+from execution.execution_gateway import BinanceExecutionGateway
+from execution.risk_guardrails import RiskGuardrailEngine
+from execution.oms import OrderManagementSystem
 
 # Configure logging
 logging.basicConfig(
@@ -37,11 +22,21 @@ logging.basicConfig(
     handlers=[logging.StreamHandler(sys.stdout)]
 )
 logger = logging.getLogger("MFT_Supervisor")
-PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# ======================================================================
-# Event-Driven Supervisor Loop
-# ======================================================================
+JOURNAL_FILE = "/usr/local/google/home/singhujwal/mft_project/trade_journal.json"
+
+def write_to_trade_journal(record: Dict):
+    """Appends a structured JSON record of every completed execution and net balance step."""
+    try:
+        with open(JOURNAL_FILE, "a") as f:
+            f.write(json.dumps(record) + "\n")
+    except Exception as e:
+        logger.error(f"Failed to write to trade journal: {e}")
+
+# ==========================================
+# # Event-Driven Supervisor Loop
+# ==========================================
+
 async def trading_supervisor_loop(
     queue: asyncio.Queue,
     feature_store: FeatureStore,
@@ -50,192 +45,250 @@ async def trading_supervisor_loop(
     order_generator: OrderGenerator,
     risk_critic: RiskGuardrailEngine,
     oms: OrderManagementSystem,
-    portfolio_value: float
+    initial_portfolio_value: float,
+    current_inventory: Dict[str, float]
 ):
-    """Consumes normalized ticks, evaluates AI alpha, sizes positions, validates risk, and executes live trades."""
-    logger.info("Trading Supervisor Loop fully wired and operational.")
-    current_inventory: Dict[str, float] = {"BTCUSDT": 0.0}  # Track holding cash value
-    average_entry_price: Dict[str, float] = {"BTCUSDT": 0.0}
-    realized_pnl: float = 0.0
-    
-    try:
-        while True:
-            # Phase 1: Ingestion (Get Normalized Tick)
-            tick: InternalTick = await queue.get()
-            try:
-                logger.debug(f"Supervisor ingested tick: {tick.symbol} @ {tick.bid}x{tick.ask}")
-        
-                # Phase 2: Perception (Update LOB & Compute Features)
-                features = feature_store.process_tick(tick)
-                if features is None:
-                    continue # Warming up feature windows
-                    
-                logger.debug(f"Phase 2 [Perception] Feature Vector computed: {features}")
-                
-                # Phase 3: Intelligence (Predict Alpha & Size Position)
-                alpha_forecast = alpha_model.predict(features)
-                target_weight = optimizer.calculate_target_weight(alpha_forecast)
-                logger.debug(f"Phase 3 [Intelligence] Alpha Forecast: {alpha_forecast:.6f} | Target Weight: {target_weight:.2%}")
-                
-                # Generate Rebalancing Orders
-                current_holding = current_inventory.get(tick.symbol, 0.0)
-                proposed_order = order_generator.generate_order(
-                    symbol=tick.symbol,
-                    target_weight=target_weight,
-                    current_inventory=current_holding,
-                    portfolio_value=portfolio_value,
-                    bid=tick.bid,
-                    ask=tick.ask
-                )
-                
-                if proposed_order:
-                    mid_price = (tick.bid + tick.ask) / 2.0
-                    logger.info(f"Phase 3 [Intelligence] Proposed Order -> {proposed_order}")
-                    
-                    # Phase 4: Execution & Risk Guardrails (Maker-Critic)
-                    is_approved = risk_critic.validate_order(proposed_order, mid_price)
-                    
-                    if is_approved:
-                        logger.info("Phase 4 [Critic] Order Approved by Guardrails. Sending to OMS...")
-                        execution_report = await oms.process_approved_order(proposed_order)
-                        
-                        if execution_report and execution_report.get("status") == "FILLED":
-                            # Update Portfolio Inventory State
-                            action = execution_report["action"]
-                            notional = execution_report["executed_qty"]
-                            exec_price = execution_report.get("executed_price", proposed_order.get("limit_price", 0.0))
-                            
-                            trade_pnl = 0.0
-                            
-                            trade_notional = notional if action == "BUY" else -notional
-                            old_notional = current_inventory[tick.symbol]
-                            new_notional = old_notional + trade_notional
-                            old_avg = average_entry_price[tick.symbol]
-                            
-                            if abs(old_notional) < 0.01:
-                                # Opening fresh position
-                                average_entry_price[tick.symbol] = exec_price
-                                trade_pnl = 0.0
-                            elif (old_notional > 0 and trade_notional > 0) or (old_notional < 0 and trade_notional < 0):
-                                # Adding to existing position (same sign)
-                                average_entry_price[tick.symbol] = ((abs(old_notional) * old_avg) + (notional * exec_price)) / abs(new_notional)
-                                trade_pnl = 0.0
-                            else:
-                                # Reducing or flipping position
-                                if notional <= abs(old_notional):
-                                    # Reducing position
-                                    qty_closed = notional / exec_price if exec_price > 0 else 0.0
-                                    direction = 1 if old_notional > 0 else -1
-                                    trade_pnl = (exec_price - old_avg) * qty_closed * direction
-                                else:
-                                    # Flipping position
-                                    qty_closed = abs(old_notional) / exec_price if exec_price > 0 else 0.0
-                                    direction = 1 if old_notional > 0 else -1
-                                    trade_pnl = (exec_price - old_avg) * qty_closed * direction
-                                    average_entry_price[tick.symbol] = exec_price
-                            
-                            realized_pnl += trade_pnl
-                            current_inventory[tick.symbol] = new_notional
-                            
-                            # Prevent floating point drift around 0
-                            if abs(current_inventory[tick.symbol]) < 0.01:
-                                current_inventory[tick.symbol] = 0.0
-                                average_entry_price[tick.symbol] = 0.0
+    """Consumes ticks, monitors active bracket limits (TP/SL/Timeout), and triggers automatic exits."""
+    logger.info(f"Bracket-Trading Supervisor Loop fully wired. Active Alpha: [{alpha_model.alpha_type}]")
 
-                            # BUG-06 FIX: Update risk critic with real portfolio value after every fill
-                            risk_critic.update_portfolio_value(portfolio_value + realized_pnl)
-                                    
-                            logger.info(f"Portfolio Inventory Updated -> {current_inventory} | Realized PnL: ${realized_pnl:.2f}")
-                            
-                            journal_entry = {
-                                "timestamp": datetime.now().isoformat(),
-                                "symbol": tick.symbol,
-                                "action": action,
-                                "executed_price": exec_price,
-                                "executed_notional": notional,
-                                "trade_pnl": trade_pnl,
-                                "cumulative_pnl": realized_pnl
-                            }
-                            journal_path = os.path.join(PROJECT_DIR, "trades_journal.json")
-                            try:
-                                with open(journal_path, "a") as f:
-                                    f.write(json.dumps(journal_entry) + "\n")
-                            except Exception as e:
-                                logger.error(f"Failed to write to trades journal: {e}")
+    # Accounting and State variables
+    cash_balance = initial_portfolio_value
+    crypto_units = 0.0
+    portfolio_value = initial_portfolio_value
+    current_inventory[list(current_inventory.keys())[0]] = crypto_units
+
+    # Bracket State Machine
+    active_position: Optional[Dict] = None # Tracks entry metadata and limits
+    cumulative_pnl = 0.0
+
+    while True:
+        # Phase 1: Ingestion
+        tick: InternalTick = await queue.get()
+        mid_price = (tick.bid + tick.ask) / 2.0
+        current_time = int(time.time())
+
+        # Dynamically update aggregate portfolio equity balance
+        portfolio_value = cash_balance + (crypto_units * mid_price)
+        risk_critic.current_portfolio_value = portfolio_value
+        if hasattr(risk_critic, 'daily_peak_value'):
+            if portfolio_value > risk_critic.daily_peak_value:
+                risk_critic.daily_peak_value = portfolio_value
+
+        logger.debug(f"Balance: ${portfolio_value:.2f} | Cash: ${cash_balance:.2f} | Crypto: {crypto_units:.6f} units")
+
+        # ==============================================================
+        # # A. ACTIVE BRACKET POSITION MONITORING (EXIT CHANNEL)
+        # ==============================================================
+        if active_position is not None:
+            bracket = active_position["bracket"]
+            action = active_position["action"]
+
+            # Check Exit Conditions (Take Profit, Stop Loss, or Timeout)
+            is_tp_breached = False
+            is_sl_breached = False
+            is_timeout_breached = (current_time - active_position["entry_timestamp"]) >= bracket["timeout_seconds"]
+
+            if action == "BUY": # Long Position
+                is_tp_breached = mid_price >= bracket["take_profit_price"]
+                is_sl_breached = mid_price <= bracket["stop_loss_price"]
+            else: # Short Position
+                is_tp_breached = mid_price <= bracket["take_profit_price"]
+                is_sl_breached = mid_price >= bracket["stop_loss_price"]
+
+            if is_tp_breached or is_sl_breached or is_timeout_breached:
+                # Resolve Exit Rationale
+                exit_reason = "TIMEOUT (30M EXPIRED)"
+                if is_tp_breached:
+                    exit_reason = "TAKE_PROFIT"
+                elif is_sl_breached:
+                    exit_reason = "STOP_LOSS"
+
+                logger.warning(f"🚨 BRACKET EXIT TRIGGERED -> Reason: {exit_reason} | Mid: {mid_price:.2f}")
+
+                # Route Emergency Market Sell order to OMS to flatten position instantly
+                exit_order = {
+                    "symbol": tick.symbol,
+                    "action": "SELL" if action == "BUY" else "BUY",
+                    "quantity": crypto_units,
+                    "type": "market"
+                }
+
+                execution_report = await oms.process_approved_order(exit_order)
+                if execution_report and execution_report.get("status") == "FILLED":
+                    net_cash = execution_report["executed_qty_cash"]
+                    executed_exit_price = execution_report["executed_price"]
+                    fee_paid = execution_report.get("fee_paid", 0.0)
+
+                    # Calculate realized trade performance
+                    entry_price = bracket["entry_price"]
+                    trade_pnl = 0.0
+                    if action == "BUY":
+                        cash_balance += net_cash
+                        crypto_units = 0.0
+                        # PNL = Proceeds received - Cash spent initially
+                        trade_pnl = net_cash - active_position["notional"]
                     else:
-                        logger.warning("Phase 4 [Critic] Order Rejected. Check DLQ audit journal.")
-            finally:
-                # BUG-07 FIX: Always mark tick done, even if an exception fires mid-processing
-                queue.task_done()
-    finally:
-        logger.critical("Supervisor loop exiting. Triggering fail-safe auto-sell liquidation...")
-        
-        # Drain/empty the queue to release references and clean up resources
-        logger.info("Draining and clearing internal message queue...")
-        while not queue.empty():
-            try:
-                queue.get_nowait()
-                queue.task_done()
-            except asyncio.QueueEmpty:
-                break
-                
-        journal_path = os.path.join(PROJECT_DIR, "trades_journal.json")
-        # BUG-09 FIX: Pass realized_pnl so liquidation journal entries show correct cumulative PnL
-        await oms.liquidate_all(current_inventory, average_entry_price, journal_path, realized_pnl)
+                        cash_balance -= net_cash
+                        crypto_units = 0.0
+                        trade_pnl = active_position["notional"] - net_cash
 
-        
-# ======================================================================
-# Application Entry Point
-# ======================================================================
+                    current_inventory[tick.symbol] = crypto_units
+                    portfolio_value = cash_balance
+                    cumulative_pnl += trade_pnl
+
+                    logger.info(
+                        f"✅ BRACKET POSITION FLATTENED -> P&L realized: ${trade_pnl:+.2f}, "
+                        f"Portfolio Balance: ${portfolio_value:.2f} | Fee Paid: -${fee_paid:.4f}"
+                    )
+
+                    # Write full execution metrics to JSON lines journal
+                    write_to_trade_journal({
+                        "timestamp": int(time.time()),
+                        "symbol": tick.symbol,
+                        "action": "EXIT_" + action,
+                        "reason": exit_reason,
+                        "entry_price": entry_price,
+                        "exit_price": executed_exit_price,
+                        "trade_pnl": trade_pnl,
+                        "cumulative_pnl": cumulative_pnl,
+                        "portfolio_value": portfolio_value,
+                        "fee_paid": fee_paid
+                    })
+
+                    active_position = None # Clear state
+
+                queue.task_done()
+                continue
+
+        # ==============================================================
+        # # B. SIGNAL EVALUATION & BRACKET ENTRY
+        # ==============================================================
+        features = feature_store.process_tick(tick)
+        if features is None:
+            queue.task_done()
+            continue
+
+        logger.info(f"Phase 2 [Perception] Feature Vector: {features}")
+
+        # Phase 3: Intelligence
+        alpha_forecast = alpha_model.predict(features)
+        target_weight = optimizer.calculate_target_weight(alpha_forecast)
+
+        # Attempt to generate a new bracket order
+        proposed_order = order_generator.generate_bracket_order(
+            symbol=tick.symbol,
+            target_weight=target_weight,
+            portfolio_value=portfolio_value,
+            bid=tick.bid,
+            ask=tick.ask
+        )
+
+        if proposed_order:
+            logger.info(f"🔮 STRATEGY ENTRY PROPOSED -> {proposed_order}")
+
+            # Validate through risk engine
+            is_approved = risk_critic.validate_order(proposed_order, mid_price)
+            if is_approved:
+                logger.info("Phase 4 [Critic] Order Approved. Submitting Limit Entry...")
+                execution_report = await oms.process_approved_order(proposed_order)
+
+                if execution_report and execution_report.get("status") == "FILLED":
+                    action = execution_report["action"]
+                    net_crypto = execution_report["executed_qty_crypto"]
+                    net_cash = execution_report["executed_qty_cash"]
+                    fee_paid = execution_report.get("fee_paid", 0.0)
+
+                    if action == "BUY":
+                        cash_balance -= proposed_order["notional"]
+                        crypto_units += net_crypto
+                    else:
+                        crypto_units -= max(0.0, crypto_units - net_crypto)
+                        cash_balance += net_cash
+
+                    # Sync orchestrator state
+                    current_inventory[tick.symbol] = crypto_units
+
+                    # Initialize Active Bracket tracking
+                    active_position = proposed_order
+                    active_position["bracket"]["entry_price"] = execution_report["executed_price"]
+
+                    logger.info(
+                        f"🚀 BRACKET POSITION INITIALIZED -> Entry: {active_position['bracket']['entry_price']:.2f} | "
+                        f"TP Target: {active_position['bracket']['take_profit_price']:.2f} | "
+                        f"SL Guard: {active_position['bracket']['stop_loss_price']:.2f} | "
+                        f"TO Limits: {active_position['bracket']['timeout_seconds']}s"
+                    )
+
+                    # Journal Entry
+                    write_to_trade_journal({
+                        "timestamp": int(time.time()),
+                        "symbol": tick.symbol,
+                        "action": "ENTRY_" + action,
+                        "reason": "STRATEGY SIGNAL",
+                        "entry_price": active_position["bracket"]["entry_price"],
+                        "exit_price": 0.0,
+                        "trade_pnl": 0.0,
+                        "cumulative_pnl": cumulative_pnl,
+                        "portfolio_value": portfolio_value,
+                        "fee_paid": fee_paid
+                    })
+            else:
+                logger.warning("Phase 4 [Critic] Entry Order Rejected. Checked DLQ journal.")
+
+        queue.task_done()
+
+# ==========================================
+# # Application Entry Point (With Fail-Safe Auto-Sell)
+# ==========================================
 async def main():
     logger.info("Initializing Enterprise Crypto MFT System - 100% LIVE TRADING MODE...")
-    
-    # Configuration for BTC/USDT on Binance
+
+    PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+    WEIGHTS_PATH = os.path.join(PROJECT_DIR, "weights.lgb")
+    DLQ_PATH = os.path.join(PROJECT_DIR, "dlq_audit.json")
+
     SYMBOL = "BTCUSDT"
-    BINANCE_WSS_URL = f"wss://stream.binance.com:9443/ws/{SYMBOL.lower()}@bookTicker"
+    BINANCE_WSS_URL = f"wss://stream.binance.com:9443/ws/{SYMBOL.lower()}@depth5@100ms"
     BINANCE_REST_URL = f"https://api.binance.com/api/v3/depth?symbol={SYMBOL}&limit=5"
-    
-    # Load Live Execution Parameters
+
     BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
     BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
-    INITIAL_PORTFOLIO_VALUE = float(os.getenv("PORTFOLIO_CASH_VALUE", "10000.0")) # Default $10k bankroll
-    
-    # Check if user explicitly enabled Paper Trading via environment variable
-    PAPER_TRADING = os.getenv("PAPER_TRADING", "false").lower() == "true"
-    
+    INITIAL_PORTFOLIO_VALUE = float(os.getenv("PORTFOLIO_CASH_VALUE", "10000.0"))
+    PAPER_TRADING = os.getenv("PAPER_TRADING", "False").lower() == "true"
+
+    # CLI Selection parameter: default to KALMAN math filter
+    ALPHA_MODEL_TYPE = os.getenv("ALPHA_MODEL_TYPE", "KALMAN")
+
     if not PAPER_TRADING and (not BINANCE_API_KEY or not BINANCE_API_SECRET):
         logger.critical("⚠️ LIVE TRADING ENABLED but BINANCE_API_KEY or BINANCE_API_SECRET is missing! Halting startup.")
         sys.exit(1)
-        
-    # Initialize Core Async Queue — BUG-10 FIX: bounded to prevent unbounded memory growth
-    message_queue = asyncio.Queue(maxsize=1000)
-    
-    # Initialize Subsystems across all Domains
+
+    message_queue = asyncio.Queue()
+
     binance_adapter = BinanceCryptoAdapter(symbol=SYMBOL, wss_url=BINANCE_WSS_URL, rest_url=BINANCE_REST_URL)
     feature_store = FeatureStore(window_size=1000)
-    alpha_model_path = os.path.join(PROJECT_DIR, "weights.lgb")
-    alpha_model = AlphaModel(model_path=alpha_model_path)
+
+    # Dynamically configure active forecast model selection (ML, OU, KALMAN, OFI)
+    alpha_model = AlphaModel(model_path=WEIGHTS_PATH, alpha_type=ALPHA_MODEL_TYPE)
     optimizer = PortfolioOptimizer()
     order_generator = OrderGenerator()
-    
-    dlq_path = os.path.join(PROJECT_DIR, "dlq_audit.json")
-    dlq = DeadLetterQueue(journal_path=dlq_path)
-    risk_critic = RiskGuardrailEngine(
-        dlq=dlq,
-        max_drawdown_limit=0.05,
-        initial_portfolio_value=INITIAL_PORTFOLIO_VALUE  # BUG-06 FIX: seed with real portfolio value
-    )
-    
-    # Initialize Live Gateway
-    gateway = BinanceExecutionGateway(
-        api_key=BINANCE_API_KEY,
-        api_secret=BINANCE_API_SECRET,
-        paper_trading=PAPER_TRADING
-    )
+
+    dlq = DeadLetterQueue(journal_path=DLQ_PATH)
+    risk_critic = RiskGuardrailEngine(dlq=dlq, max_drawdown_limit=0.05)
+    gateway = BinanceExecutionGateway(api_key=BINANCE_API_KEY, api_secret=BINANCE_API_SECRET, paper_trading=PAPER_TRADING)
     oms = OrderManagementSystem(gateway=gateway)
-    
-    # Concurrently run Ingestion Adapter and Supervisor Loop
+
+    current_inventory: Dict[str, float] = {SYMBOL: 0.0}
+
+    # Initialize clean trade journal file for the run session
     try:
+        with open(JOURNAL_FILE, "w") as f:
+            f.write("") # Overwrite with clean journal
+    except Exception:
+        pass
+
+    try:
+        logger.info(f"Launching supervisor with Alpha Model: [{ALPHA_MODEL_TYPE}]...")
         await asyncio.gather(
             binance_adapter.connect_and_stream(message_queue),
             trading_supervisor_loop(
@@ -246,26 +299,27 @@ async def main():
                 order_generator=order_generator,
                 risk_critic=risk_critic,
                 oms=oms,
-                portfolio_value=INITIAL_PORTFOLIO_VALUE
+                initial_portfolio_value=INITIAL_PORTFOLIO_VALUE,
+                current_inventory=current_inventory
             )
         )
-    except TradingBaseException:
-        raise  # BUG-01 FIX: Let it propagate cleanly to __main__ handler after finally cleanup
     except asyncio.CancelledError:
-        logger.info("Orchestrator received cancel signal.")
+        logger.info("Orchestrator received cancel signal (SIGINT/SIGTERM). Initiating fail-safe shutdown...")
+    except Exception as e:
+        logger.critical(f"CRITICAL UNHANDLED EXCEPTION IN SUPERVISOR: {e}. Initiating emergency liquidation...")
     finally:
+        logger.info("Shutting down ingestion adapter and severing WebSocket connections...")
         await binance_adapter.close()
+
+        logger.warning("Checking inventory state for required emergency liquidation...")
+        await oms.liquidate_all(current_inventory)
+
+        logger.info("Closing CCXT gateway sessions cleanly...")
         await gateway.close()
+        logger.info("Trading system shutdown complete. All positions flattened.")
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("Trading system shutdown cleanly by user.")
-    except TradingBaseException as tbe:
-        logger.critical(f"🛑 FATAL TRADING PIPELINE ERROR: {tbe}")
-        sys.exit(1)
-    except Exception as e:
-        logger.critical(f"🛑 UNEXPECTED SYSTEM ERROR: {e}")
-        sys.exit(1)
-
+        logger.info("Ctrl+C detected by OS. Asyncio event loop terminating cleanly.")

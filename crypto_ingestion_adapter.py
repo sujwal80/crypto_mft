@@ -61,7 +61,7 @@ class IngestionWatchdog:
                     logger.warning(f"SILENT DATA STALL DETECTED for {self.symbol} ({time_gap:.1f}s). Force restarting socket...")
                     self.is_connected = False
                     await reconnect_callback()
-                    
+
     async def reconcile_missing_data(self, queue: asyncio.Queue, session: aiohttp.ClientSession):
         """Queries REST API to backfill missing ticks during a socket disconnection."""
         logger.info(f"Executing REST Backfill Reconciliation for {self.symbol}...")
@@ -75,7 +75,7 @@ class IngestionWatchdog:
                     # Parse Binance REST order book snapshot
                     bids = data.get("bids", [["0", "0"]])
                     asks = data.get("asks", [["0", "0"]])
-                    
+
                     recovery_tick = InternalTick(
                         symbol=self.symbol,
                         exchange=self.exchange,
@@ -110,10 +110,10 @@ class BinanceCryptoAdapter:
     async def connect_and_stream(self, queue: asyncio.Queue):
         self.queue = queue
         self.session = aiohttp.ClientSession()
-        
+
         # Start Watchdog Monitoring
         asyncio.create_task(self.watchdog.monitor_health(queue, self.force_reconnect))
-        
+
         backoff = 1.0
         while True:
             try:
@@ -121,27 +121,27 @@ class BinanceCryptoAdapter:
                 async with websockets.connect(self.wss_url) as ws:
                     self.watchdog.is_connected = True
                     backoff = 1.0 # Reset backoff on successful connection
-                    
+
                     # Execute REST reconciliation backfill upon reconnection
                     await self.watchdog.reconcile_missing_data(queue, self.session)
-                    
+
                     while not self.reconnect_event.is_set():
                         raw_message = await ws.recv()
                         self.watchdog.update_tick_time()
-                        
+
                         try:
                             # Pydantic Schema Validation
                             payload = BinanceDepthPayload.model_validate_json(raw_message)
-                            
+
                             # Extract Best Bid / Best Ask
                             bid = float(payload.b[0].price) if payload.b else 0.0
                             bid_size = float(payload.b[0].quantity) if payload.b else 0.0
                             ask = float(payload.a[0].price) if payload.a else 0.0
                             ask_size = float(payload.a[0].quantity) if payload.a else 0.0
-                            
+
                             # Normalize Timestamp to Epoch Nanoseconds
                             timestamp_ns = payload.E * 1_000_000 # ms to ns
-                            
+
                             internal_tick = InternalTick(
                                 symbol=self.symbol,
                                 exchange="BINANCE",
@@ -151,13 +151,13 @@ class BinanceCryptoAdapter:
                                 ask_size=ask_size,
                                 timestamp_ns=timestamp_ns
                             )
-                            
+
                             await queue.put(internal_tick)
                         except ValidationError as ve:
                             logger.error(f"Schema Validation Error on Binance stream: {ve}")
                         except Exception as e:
                             logger.error(f"Error parsing tick: {e}")
-                            
+
             except (websockets.WebSocketException, ConnectionError) as we:
                 logger.warning(f"Binance WebSocket Disconnected: {we}. Reconnecting in {backoff}s...")
                 self.watchdog.is_connected = False
@@ -182,13 +182,13 @@ async def main():
     SYMBOL = "BTCUSDT"
     BINANCE_WSS_URL = f"wss://stream.binance.com:9443/ws/{SYMBOL.lower()}@depth5@100ms"
     BINANCE_REST_URL = f"https://api.binance.com/api/v3/depth?symbol={SYMBOL}&limit=5"
-    
+
     # Create central asyncio Queue for inter-process decoupling
     message_queue = asyncio.Queue()
-    
+
     # Initialize Adapter
     binance_adapter = BinanceCryptoAdapter(symbol=SYMBOL, wss_url=BINANCE_WSS_URL, rest_url=BINANCE_REST_URL)
-    
+
     # Concurrently run Ingestion Adapter and Feature Consumer
     await asyncio.gather(
         binance_adapter.connect_and_stream(message_queue),

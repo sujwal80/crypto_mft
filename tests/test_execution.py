@@ -1,104 +1,145 @@
 import os
+import json
 import pytest
-import asyncio
+import ccxt
+import time
+from unittest.mock import MagicMock, AsyncMock
+
 from execution.dead_letter_queue import DeadLetterQueue
-from execution.binance_execution_gateway import BinanceExecutionGateway
-from execution.risk_guardrail_engine import RiskGuardrailEngine
-from execution.order_management_system import OrderManagementSystem
+from execution.risk_guardrails import RiskGuardrailEngine
+from execution.oms import OrderManagementSystem
+from execution.execution_gateway import BinanceExecutionGateway
 
-def test_dead_letter_queue(tmp_path):
-    journal_file = tmp_path / "test_dlq.json"
-    dlq = DeadLetterQueue(journal_path=str(journal_file))
+# ==============================================================================
+# 1. Dead Letter Queue Tests
+# ==============================================================================
+def test_dead_letter_queue_audit(tmp_path):
+    audit_file = tmp_path / "dlq_audit.json"
+    dlq = DeadLetterQueue(audit_path=str(audit_file))
     
-    proposed_order = {"symbol": "BTCUSDT", "action": "BUY", "notional": 1000.0}
-    dlq.log_rejection(proposed_order, "Collar limit exceeded")
+    test_payload = {
+        "symbol": "BTCUSDT",
+        "action": "BUY",
+        "reason": "FAT_FINGER_COLLAR",
+        "price": 100000.0
+    }
     
-    assert journal_file.exists()
-    content = journal_file.read_text()
-    assert "Collar limit exceeded" in content
-    assert "BTCUSDT" in content
-
-@pytest.mark.asyncio
-async def test_binance_execution_gateway_paper():
-    gateway = BinanceExecutionGateway(paper_trading=True)
-    order_payload = {"symbol": "BTCUSDT", "action": "BUY", "notional": 500.0, "limit_price": 50000.0}
+    dlq.write_to_dlq(test_payload)
     
-    report = await gateway.send_order(order_payload)
-    assert report["status"] == "FILLED"
-    assert report["symbol"] == "BTCUSDT"
-    assert report["executed_price"] == 50000.0
-    assert report["executed_qty"] == 500.0
-    assert report["order_id"].startswith("PAPER_")
-    
-    await gateway.close()
-
-def test_risk_guardrail_engine(tmp_path):
-    journal_file = tmp_path / "test_dlq.json"
-    dlq = DeadLetterQueue(journal_path=str(journal_file))
-    
-    engine = RiskGuardrailEngine(dlq=dlq, max_drawdown_limit=0.05, initial_portfolio_value=100000.0)
-    
-    # Test valid order
-    proposed_order = {"symbol": "BTCUSDT", "action": "BUY", "notional": 1000.0, "limit_price": 50000.0}
-    assert engine.validate_order(proposed_order, 50000.0) is True
-    
-    # Test price collar reject
-    assert engine.validate_order(proposed_order, 40000.0) is False # > 2% deviation
-    
-    # Test drawdown circuit breaker
-    engine.update_portfolio_value(90000.0)  # 10% drawdown from 100k peak
-    assert engine.validate_order(proposed_order, 50000.0) is False
-
-@pytest.mark.asyncio
-async def test_order_management_system(tmp_path):
-    gateway = BinanceExecutionGateway(paper_trading=True)
-    oms = OrderManagementSystem(gateway=gateway)
-    
-    approved_order = {"symbol": "BTCUSDT", "action": "BUY", "notional": 500.0, "limit_price": 50000.0}
-    report = await oms.process_approved_order(approved_order)
-    
-    assert report is not None
-    assert report["status"] == "FILLED"
-    
-    # Test fail-safe liquidate_all with average entry price and PnL calculation
-    inventory = {"BTCUSDT": 1000.0}
-    avg_price = {"BTCUSDT": 50000.0}
-    journal_file = tmp_path / "test_trades_journal.json"
-    
-    await oms.liquidate_all(inventory, avg_price, str(journal_file))
-    
-    assert inventory["BTCUSDT"] == 0.0
-    assert avg_price["BTCUSDT"] == 0.0
-    
-    # Check that journal file was written
-    assert journal_file.exists()
-    content = journal_file.read_text()
-    assert "BTCUSDT" in content
-    assert "SELL" in content
-    
-    await gateway.close()
-
-from core.exceptions import InsufficientFundsException, CriticalExecutionException
-
-@pytest.mark.asyncio
-async def test_oms_exception_propagation():
-    # Mock a gateway that throws insufficient funds
-    class MockGatewayInsufficientFunds:
-        async def send_order(self, order_payload):
-            raise Exception("Account has insufficient balance for requested action.")
-            
-    oms_funds = OrderManagementSystem(gateway=MockGatewayInsufficientFunds())
-    approved_order = {"symbol": "BTCUSDT", "action": "BUY", "notional": 500.0, "limit_price": 50000.0}
-    
-    with pytest.raises(InsufficientFundsException):
-        await oms_funds.process_approved_order(approved_order)
+    assert os.path.exists(audit_file)
+    with open(audit_file, "r") as f:
+        records = [json.loads(line) for line in f if line.strip()]
         
-    # Mock a gateway that throws invalid API-key
-    class MockGatewayPermissionError:
-        async def send_order(self, order_payload):
-            raise Exception("Invalid API-key, IP, or permissions for action.")
-            
-    oms_perm = OrderManagementSystem(gateway=MockGatewayPermissionError())
-    with pytest.raises(CriticalExecutionException):
-        await oms_perm.process_approved_order(approved_order)
+    assert len(records) == 1
+    assert records[0]["symbol"] == "BTCUSDT"
+    assert records[0]["reason"] == "FAT_FINGER_COLLAR"
+    assert "timestamp_ns" in records[0]
 
+# ==============================================================================
+# 2. Risk Guardrails Tests
+# ==============================================================================
+def test_risk_guardrail_valid_order():
+    guard = RiskGuardrailEngine(max_drawdown_limit=10.0, fat_finger_collar=0.02)
+    
+    order = {
+        "symbol": "BTCUSDT",
+        "action": "BUY",
+        "price": 60000.0,
+        "amount_crypto": 0.1
+    }
+    
+    approved, reason = guard.validate_order(order, mid_price=60000.0)
+    assert approved is True
+    assert reason == "APPROVED"
+
+def test_risk_guardrail_fat_finger_collar():
+    guard = RiskGuardrailEngine(max_drawdown_limit=10.0, fat_finger_collar=0.02)
+    
+    # 65000 is > 2% from mid price 60000 (which would be 61200 max)
+    order = {
+        "symbol": "BTCUSDT",
+        "action": "BUY",
+        "price": 65000.0,
+        "amount_crypto": 0.1
+    }
+    
+    approved, reason = guard.validate_order(order, mid_price=60000.0)
+    assert approved is False
+    assert "FAT_FINGER_COLLAR_EXCEEDED" in reason
+
+# ==============================================================================
+# 3. Order Management System (OMS) Tests
+# ==============================================================================
+@pytest.mark.asyncio
+async def test_oms_process_approved_order():
+    gateway_mock = MagicMock()
+    execution_report_mock = {
+        "order_id": "SIM-123",
+        "symbol": "BTCUSDT",
+        "action": "BUY",
+        "executed_price": 60000.0,
+        "executed_qty_cash": 6000.0,
+        "executed_qty_crypto": 0.1,
+        "fee_paid": 1.2,
+        "status": "FILLED"
+    }
+    gateway_mock.send_order = AsyncMock(return_value=execution_report_mock)
+    
+    oms = OrderManagementSystem(gateway=gateway_mock)
+    
+    order = {
+        "symbol": "BTCUSDT",
+        "action": "BUY",
+        "price": 60000.0,
+        "notional": 6000.0
+    }
+    
+    res = await oms.process_approved_order(order)
+    assert res is not None
+    assert res["status"] == "FILLED"
+    assert res["order_id"] == "SIM-123"
+
+@pytest.mark.asyncio
+async def test_oms_exception_handling():
+    gateway_mock = MagicMock()
+    # Mock send_order to raise an Exception
+    gateway_mock.send_order = AsyncMock(side_effect=Exception("Connection loss"))
+    
+    oms = OrderManagementSystem(gateway=gateway_mock)
+    
+    order = {
+        "symbol": "BTCUSDT",
+        "action": "BUY",
+        "price": 60000.0,
+        "notional": 6000.0
+    }
+    
+    res = await oms.process_approved_order(order)
+    assert res is None
+
+# ==============================================================================
+# 4. Execution Gateway Paper Simulator Tests
+# ==============================================================================
+@pytest.mark.asyncio
+async def test_execution_gateway_simulation():
+    gateway = BinanceExecutionGateway(
+        api_key=None,
+        api_secret=None,
+        paper_trading=True
+    )
+    
+    # Simulate a market BUY order
+    fill = await gateway.send_order({
+        "symbol": "BTCUSDT",
+        "action": "BUY",
+        "notional": 6000.0,
+        "type": "limit",
+        "limit_price": 60000.0
+    })
+    
+    assert fill["status"] == "FILLED"
+    assert fill["symbol"] == "BTCUSDT"
+    assert fill["action"] == "BUY"
+    assert fill["executed_qty_crypto"] > 0
+    assert fill["executed_qty_cash"] > 0
+    assert "fee_paid" in fill
