@@ -15,57 +15,91 @@ from execution.execution_gateway import BinanceExecutionGateway
 # ==============================================================================
 def test_dead_letter_queue_audit(tmp_path):
     audit_file = tmp_path / "dlq_audit.json"
-    dlq = DeadLetterQueue(audit_path=str(audit_file))
+    dlq = DeadLetterQueue(journal_path=str(audit_file))
     
     test_payload = {
         "symbol": "BTCUSDT",
         "action": "BUY",
-        "reason": "FAT_FINGER_COLLAR",
-        "price": 100000.0
+        "limit_price": 100000.0
     }
     
-    dlq.write_to_dlq(test_payload)
+    dlq.log_rejection(test_payload, "FAT_FINGER_COLLAR")
     
     assert os.path.exists(audit_file)
     with open(audit_file, "r") as f:
         records = [json.loads(line) for line in f if line.strip()]
         
     assert len(records) == 1
-    assert records[0]["symbol"] == "BTCUSDT"
-    assert records[0]["reason"] == "FAT_FINGER_COLLAR"
-    assert "timestamp_ns" in records[0]
+    assert records[0]["proposed_order"]["symbol"] == "BTCUSDT"
+    assert records[0]["rejection_reason"] == "FAT_FINGER_COLLAR"
+    assert "timestamp" in records[0]
 
 # ==============================================================================
 # 2. Risk Guardrails Tests
 # ==============================================================================
-def test_risk_guardrail_valid_order():
-    guard = RiskGuardrailEngine(max_drawdown_limit=10.0, fat_finger_collar=0.02)
+def test_risk_guardrail_valid_order(tmp_path):
+    audit_file = tmp_path / "dlq_audit.json"
+    dlq = DeadLetterQueue(journal_path=str(audit_file))
+    guard = RiskGuardrailEngine(dlq=dlq, max_drawdown_limit=0.05)
     
     order = {
         "symbol": "BTCUSDT",
         "action": "BUY",
-        "price": 60000.0,
+        "limit_price": 60000.0,
         "amount_crypto": 0.1
     }
     
-    approved, reason = guard.validate_order(order, mid_price=60000.0)
+    approved = guard.validate_order(order, current_mid_price=60000.0)
     assert approved is True
-    assert reason == "APPROVED"
 
-def test_risk_guardrail_fat_finger_collar():
-    guard = RiskGuardrailEngine(max_drawdown_limit=10.0, fat_finger_collar=0.02)
+def test_risk_guardrail_fat_finger_collar(tmp_path):
+    audit_file = tmp_path / "dlq_audit.json"
+    dlq = DeadLetterQueue(journal_path=str(audit_file))
+    guard = RiskGuardrailEngine(dlq=dlq, max_drawdown_limit=0.05)
     
     # 65000 is > 2% from mid price 60000 (which would be 61200 max)
     order = {
         "symbol": "BTCUSDT",
         "action": "BUY",
-        "price": 65000.0,
+        "limit_price": 65000.0,
         "amount_crypto": 0.1
     }
     
-    approved, reason = guard.validate_order(order, mid_price=60000.0)
+    approved = guard.validate_order(order, current_mid_price=60000.0)
     assert approved is False
-    assert "FAT_FINGER_COLLAR_EXCEEDED" in reason
+    
+    # Check that it was logged to DLQ
+    assert os.path.exists(audit_file)
+    with open(audit_file, "r") as f:
+        records = [json.loads(line) for line in f if line.strip()]
+    assert len(records) == 1
+    assert "Price collar breached" in records[0]["rejection_reason"]
+
+def test_risk_guardrail_drawdown_breaker(tmp_path):
+    audit_file = tmp_path / "dlq_audit.json"
+    dlq = DeadLetterQueue(journal_path=str(audit_file))
+    guard = RiskGuardrailEngine(dlq=dlq, max_drawdown_limit=0.05)
+    
+    # Trigger drawdown breach: peak 100k, current 94k (6% drawdown >= 5% limit)
+    guard.daily_peak_value = 100000.0
+    guard.current_portfolio_value = 94000.0
+    
+    order = {
+        "symbol": "BTCUSDT",
+        "action": "BUY",
+        "limit_price": 60000.0,
+        "amount_crypto": 0.1
+    }
+    
+    approved = guard.validate_order(order, current_mid_price=60000.0)
+    assert approved is False
+    
+    # Check that it was logged to DLQ
+    assert os.path.exists(audit_file)
+    with open(audit_file, "r") as f:
+        records = [json.loads(line) for line in f if line.strip()]
+    assert len(records) == 1
+    assert "Daily drawdown limit breached" in records[0]["rejection_reason"]
 
 # ==============================================================================
 # 3. Order Management System (OMS) Tests
