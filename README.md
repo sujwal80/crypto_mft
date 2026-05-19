@@ -51,16 +51,29 @@ mft_project/
 │   └── feature_store.py       # Rolling L2 microstructural features (OBI, Micro-price)
 ├── intelligence/
 │   ├── alpha_engine.py        # Alpha predictions routing, Kelly sizing, & Bracket Generation
-│   └── mathematical_alphas.py # Modular Math Competitors (Ornstein-Uhlenbeck, Kalman, OFI)
+│   ├── strategy_factory.py    # Strategy Factory registry pattern
+│   ├── base_strategy.py       # Standardized strategy interface contract
+│   ├── ou_alpha.py            # Ornstein-Uhlenbeck Mean-Reversion strategy
+│   ├── kalman_alpha.py        # State-Space Kalman Filter strategy
+│   ├── ofi_alpha.py           # Order Flow Imbalance strategy
+│   ├── ml_alpha.py            # Tabular LightGBM ML strategy
+│   ├── heuristic_alpha.py     # Statistical rule-based fallback strategy
+│   ├── directional_alpha.py   # Directional Bias strategy (Micro-price drift)
+│   ├── portfolio_optimizer.py # Kelly sizing portfolio allocator
+│   └── order_generator.py     # Bracket entry targets generator
 ├── execution/
-│   └── risk_critic.py         # The Critic, physical latency/slippage simulation, & OMS State Machine
+│   ├── risk_guardrails.py     # Risk Critic zero-tolerance guardrails
+│   ├── dead_letter_queue.py   # Audit journal for rejected orders
+│   ├── oms.py                 # Order Management System state machine
+│   └── execution_gateway.py   # CCXT live/simulation execution gateway
 ├── backtester/
 │   └── engine.py              # High-fidelity historical Tick-by-Tick Bracket Simulator
 ├── dlq_audit.json             # Dead Letter Queue audit log for rejected orders
 ├── trade_journal.json         # Realized execution metrics logger (Buy/Sell, P&L, Slippage)
 ├── requirements.txt           # Dependency requirements
-├── run_backtest.py            # Synthetic tick series runner
-├── run_competition.py         # Competitive Mathematical Alpha league table harness
+├── run_backtest.py            # Synthetic tick series runner (default strategy)
+├── run_competition.py         # Side-by-side mathematical alpha league table harness
+├── run_directional_strategy.py# Standalone profit-only directional strategy runner
 └── main.py                    # Asyncio orchestration entry point
 ```
 
@@ -118,9 +131,15 @@ python3 run_backtest.py
 ```
 
 ### 2. Run the Model Competition Harness:
-Simulates **all four mathematical engines** side-by-side over a 15,000-tick series (quiet ranges and violent trends) and prints a competitive league table.
+Simulates **five mathematical engines** (OU, KALMAN, OFI, HEURISTIC, and DIRECTIONAL) side-by-side over a 15,000-tick series (quiet ranges and violent trends) and prints a competitive league table.
 ```bash
 python3 run_competition.py
+```
+
+### 3. Run the Directional Strategy:
+Runs a standalone backtest for the Micro-price drift Directional strategy with profit-only exit parameters (0.5% TP, disabled SL).
+```bash
+python3 run_directional_strategy.py
 ```
 
 ---

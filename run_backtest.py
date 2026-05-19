@@ -21,7 +21,7 @@ def generate_synthetic_market_data(num_ticks: int = 10000) -> List[InternalTick]
             current_trend = np.random.choice([-0.15, 0.0, 0.15]) # Trend strength
 
         # Step Price
-        price_step = np.random.normal(loc=current_trend, scale=2.0)
+        price_step = np.random.normal(loc=current_trend, scale=18.0)
         base_price += price_step
 
         # Simulate Bid/Ask Spread

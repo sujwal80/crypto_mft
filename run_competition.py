@@ -9,15 +9,33 @@ from run_backtest import generate_synthetic_market_data
 from backtester.engine import FastBacktestEngine
 from intelligence.alpha_engine import AlphaModel
 
+# Optimized parameters found via grid search
+MODEL_PARAMS = {
+    "OU": {"lookback": 120, "tp_margin": 0.0120, "sl_margin": 0.0060},
+    "KALMAN": {"lookback": 30, "tp_margin": 0.0120, "sl_margin": 0.0060},
+    "OFI": {"lookback": 80, "tp_margin": 0.0120, "sl_margin": 0.0060},
+    "HEURISTIC": {"lookback": 120, "tp_margin": 0.0120, "sl_margin": 0.0020},
+    "DIRECTIONAL": {"lookback": 50, "tp_margin": 0.0050, "sl_margin": 999.0, "timeout_seconds": 99999999},
+    "ML": {"lookback": 50, "tp_margin": 0.0060, "sl_margin": 0.0030}
+}
+
 def run_competitor(alpha_type: str, ticks: List[InternalTick]) -> dict:
     """Configures backtest engine with specific model type and returns performance outcomes."""
-    # Force mock instance to load competitor alpha type
+    # Reset seed for reproducibility across competitors
+    np.random.seed(42)
+    
+    params = MODEL_PARAMS.get(alpha_type, {})
+    
     backtester = FastBacktestEngine(
         initial_cash=10000.0,
         latency_ticks=1,
-        maker_fee=0.0002,
-        taker_fee=0.0004,
-        slippage_std=0.0001
+        maker_fee=0.0010,
+        taker_fee=0.0010,
+        slippage_std=0.0001,
+        tp_margin=params.get("tp_margin"),
+        sl_margin=params.get("sl_margin"),
+        lookback=params.get("lookback"),
+        timeout_seconds=params.get("timeout_seconds")
     )
     # Override internal AlphaModel type selection
     backtester.alpha_model = AlphaModel(alpha_type=alpha_type)
@@ -33,7 +51,7 @@ def main():
     ticks = generate_synthetic_market_data(num_ticks=15000)
     print(f"Generated {len(ticks)} high-frequency L2 test ticks successfully.\n")
 
-    competitors = ["OU", "KALMAN", "OFI", "HEURISTIC"]
+    competitors = ["OU", "KALMAN", "OFI", "HEURISTIC", "DIRECTIONAL"]
     if os.path.exists("weights.lgb"):
         competitors.append("ML")
         print("Trained ML weights ('weights.lgb') detected. Including ML (LightGBM) in competition!")
@@ -67,7 +85,7 @@ def main():
             f"${res['total_fees_paid']:7.2f}"
         )
     print("=================================================================================")
-    print("💡 NOTE: Performance is calculated using 100ms latency and 0.02%/0.04% fees.")
+    print("💡 NOTE: Performance is calculated using 100ms latency and 0.1%/0.1% fees.")
     print("=================================================================================")
 
 if __name__ == "__main__":

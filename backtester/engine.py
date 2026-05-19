@@ -20,7 +20,11 @@ class FastBacktestEngine:
         latency_ticks: int = 1,
         maker_fee: float = 0.0002,
         taker_fee: float = 0.0004,
-        slippage_std: float = 0.0001
+        slippage_std: float = 0.0001,
+        tp_margin: Optional[float] = None,
+        sl_margin: Optional[float] = None,
+        lookback: Optional[int] = None,
+        timeout_seconds: Optional[int] = None
     ):
         self.initial_cash = initial_cash
         self.latency_ticks = latency_ticks
@@ -29,10 +33,15 @@ class FastBacktestEngine:
         self.slippage_std = slippage_std
         
         # Instantiate pipeline components
-        self.feature_store = FeatureStore(window_size=1000)
+        self.feature_store = FeatureStore(window_size=1000, lookback=lookback if lookback is not None else 50)
         self.alpha_model = AlphaModel(alpha_type="HEURISTIC")
         self.optimizer = PortfolioOptimizer()
-        self.order_generator = OrderGenerator()
+        
+        order_gen_kwargs = {}
+        if tp_margin is not None: order_gen_kwargs['tp_margin'] = tp_margin
+        if sl_margin is not None: order_gen_kwargs['sl_margin'] = sl_margin
+        if timeout_seconds is not None: order_gen_kwargs['timeout_seconds'] = timeout_seconds
+        self.order_generator = OrderGenerator(**order_gen_kwargs)
         
         # Mock DLQ so we don't write json files during fast backtesting if unnecessary
         class MockDLQ:

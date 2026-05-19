@@ -6,6 +6,7 @@ from intelligence.kalman_alpha import KalmanFilterAlpha
 from intelligence.ofi_alpha import OrderFlowImbalanceAlpha
 from intelligence.ml_alpha import LightGBMAlpha
 from intelligence.heuristic_alpha import StatisticalHeuristicAlpha
+from intelligence.directional_alpha import DirectionalMicroPriceAlpha
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +22,8 @@ class AlphaStrategyFactory:
         "KALMAN": KalmanFilterAlpha,
         "OFI": OrderFlowImbalanceAlpha,
         "ML": LightGBMAlpha,
-        "HEURISTIC": StatisticalHeuristicAlpha
+        "HEURISTIC": StatisticalHeuristicAlpha,
+        "DIRECTIONAL": DirectionalMicroPriceAlpha
     }
 
     @classmethod

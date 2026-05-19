@@ -16,7 +16,7 @@ Instead of having individual prediction parameters and hardcoded routing logic i
     - Each individual strategy class (`OrnsteinUhlenbeckAlpha`, `KalmanFilterAlpha`, etc.) inherits from `BaseAlphaStrategy` and unpacks exactly the features it requires from the unified 6-dimensional microstructural feature vector.
 3.  **Dynamic Registry (`AlphaStrategyFactory`)**:
     - Maintains an active lookup registry of all strategies.
-    - Instantiates strategies dynamically on startup based on configuration strings (e.g., `OU`, `KALMAN`, `OFI`, `ML`, `HEURISTIC`).
+    - Instantiates strategies dynamically on startup based on configuration strings (e.g., `OU`, `KALMAN`, `OFI`, `DIRECTIONAL`, `ML`, `HEURISTIC`).
 4.  **Dynamic Orchestrator (`AlphaModel`)**:
     - Decoupled from strategy implementation details. Simply requests the factory to instantiate the active strategy, and delegates execution directly:
     ```python
@@ -59,6 +59,13 @@ Instead of having individual prediction parameters and hardcoded routing logic i
 
 ---
 
+### 5. Directional Bias Strategy (`DIRECTIONAL`)
+*   **File**: `intelligence/directional_alpha.py`
+*   **Concept**: A high-frequency directional strategy that trades L2 volume momentum imbalances.
+*   **Implementation**: Predicts price direction (UP/DOWN) based on volume-weighted **Micro-Price Drift**. It executes with a **Profit-Only Exit** model (0.5% Take-Profit, disabled Stop-Loss and Timeout), holding the position until the target is achieved.
+
+---
+
 ## 🚀 Step-by-Step Operational Guide
 
 Before running, make sure you have your python environment configured and dependencies installed:
@@ -67,11 +74,11 @@ python3 -m pip install -r requirements.txt
 ```
 
 ### Phase 1: Compare Mathematical Models
-To compare the three classical math models and the baseline statistical fallback side-by-side, run the competition harness:
+To compare the five classical math models and statistical fallbacks side-by-side (OU, KALMAN, OFI, HEURISTIC, and DIRECTIONAL), run the competition harness:
 ```bash
 python3 run_competition.py
 ```
-This executes a tick-by-tick historical simulator over a **15,000-tick series** (containing both quiet channels and violent breakouts) and outputs a competitive league table showing **P&L ($), Net Return (%), Max Drawdown, Win Rate, and Total Fees Paid**.
+This executes a tick-by-tick historical simulator over a **15,000-tick series** (containing both quiet channels and violent breakouts) and outputs a competitive league table showing **P&L ($), Net Return (%), Max Drawdown, Win Rate, and Total Fees Paid** under realistic transaction costs.
 
 ---
 
@@ -90,11 +97,11 @@ python3 train_ml_model.py
 
 ---
 
-### Phase 3: Run 5-Way Competitions
+### Phase 3: Run 6-Way Competitions
 Once `weights.lgb` is saved in your root folder, **`run_competition.py` will automatically detect it!**
 
 Run the competition harness again:
 ```bash
 python3 run_competition.py
 ```
-It will now dynamically include the **`ML`** strategy, running it side-by-side with `OU`, `KALMAN`, `OFI`, and `HEURISTIC` to give you a full 5-way league table comparison of all mathematical quantitative trading strategies!
+It will now dynamically include the **`ML`** strategy, running it side-by-side with `OU`, `KALMAN`, `OFI`, `HEURISTIC`, and `DIRECTIONAL` to give you a full 6-way league table comparison of all mathematical quantitative trading strategies!
