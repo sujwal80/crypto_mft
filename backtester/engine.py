@@ -103,6 +103,19 @@ class FastBacktestEngine:
                     slippage_multiplier = 1 + (drift_direction * max(0.0, random_slippage))
                     executed_exit_price = mid_price * slippage_multiplier
 
+                    # Exit Slippage Collar Check (10 bps protective margin)
+                    max_exit_slip = 0.0010
+                    if action == "BUY": # Exit is a SELL
+                        collar_limit = mid_price * (1.0 - max_exit_slip)
+                        if executed_exit_price < collar_limit:
+                            # Starvation cancellation: Stay in position and try again on next tick
+                            continue
+                    else: # Exit is a BUY (we were short)
+                        collar_limit = mid_price * (1.0 + max_exit_slip)
+                        if executed_exit_price > collar_limit:
+                            # Starvation cancellation: Stay in position
+                            continue
+
                     # Cash transaction & fees
                     fee_rate = self.taker_fee
                     

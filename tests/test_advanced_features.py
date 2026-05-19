@@ -194,3 +194,53 @@ async def test_short_inventory_sizing_fills():
     assert buy_report["action"] == "BUY"
     # Buy back crypto units matching entry
     assert buy_report["executed_qty_crypto"] > 0
+
+# ==============================================================================
+# 6. Paper Starvation & Protective Collar Testing
+# ==============================================================================
+@pytest.mark.asyncio
+async def test_execution_starvation_protective_collar():
+    # Instantiate Gateway with extremely tight collar (0.1 bp)
+    gateway = BinanceExecutionGateway(paper_trading=True)
+    gateway.max_slippage_pct = 0.000001 # extremely tight protective collar
+    
+    # Submit a market SELL order
+    # Gateway will convert this to limit order at collared price
+    order_payload = {
+        "symbol": "BTCUSDT",
+        "action": "SELL",
+        "type": "market",
+        "mid_price": 60000.0,
+        "quantity": 0.1
+    }
+    
+    report = await gateway.send_order(order_payload)
+    
+    # Due to price drift during simulated latency, this should starve/cancel!
+    assert report["status"] == "CANCELLED"
+
+# ==============================================================================
+# 7. OMS Emergency Liquidation (Short & Long) Testing
+# ==============================================================================
+@pytest.mark.asyncio
+async def test_emergency_liquidation_short_positions():
+    from execution.oms import OrderManagementSystem
+    from unittest.mock import AsyncMock, MagicMock
+
+    gateway_mock = MagicMock()
+    gateway_mock.send_order = AsyncMock(return_value={"status": "FILLED"})
+    
+    oms = OrderManagementSystem(gateway=gateway_mock)
+    
+    # Inventory holds a SHORT position of 0.5 BTC
+    current_inventory = {"BTCUSDT": -0.5}
+    
+    await oms.liquidate_all(current_inventory)
+    
+    # Verify that gateway received a BUY market order of size 0.5 to flatten short position
+    gateway_mock.send_order.assert_called_once()
+    called_payload = gateway_mock.send_order.call_args[0][0]
+    assert called_payload["symbol"] == "BTCUSDT"
+    assert called_payload["action"] == "BUY"
+    assert called_payload["quantity"] == 0.5
+    assert called_payload["type"] == "market"

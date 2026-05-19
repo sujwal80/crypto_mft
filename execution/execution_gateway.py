@@ -20,6 +20,7 @@ class BinanceExecutionGateway:
         self.api_key = api_key
         self.api_secret = api_secret
         self.paper_trading = paper_trading
+        self.max_slippage_pct = 0.0010 # Protective collar percentage margin (e.g., 0.10%)
         self.exchange = None
         self.init_exchange()
 
@@ -44,10 +45,21 @@ class BinanceExecutionGateway:
         symbol = order_payload.get("symbol")
         action = order_payload.get("action")
         order_type = order_payload.get("type", "limit")
+        original_type = order_type
         limit_price = order_payload.get("limit_price", 0.0)
+        mid_price = order_payload.get("mid_price", limit_price if limit_price > 0.0 else 65000.0)
+
+        # Unified Slippage Control: Convert market orders into protective collared limit orders
+        if order_type == "market":
+            if action == "BUY":
+                limit_price = mid_price * (1.0 + self.max_slippage_pct)
+            else:
+                limit_price = mid_price * (1.0 - self.max_slippage_pct)
+            order_type = "limit"
+            logger.info(f"Slippage Control: Converted market {action} order to protective collared limit at {limit_price:.2f}")
 
         # Resolve Target Price
-        base_price = limit_price if limit_price > 0.0 else 65000.0
+        base_price = limit_price if limit_price > 0.0 else mid_price
 
         # Resolve Sizing (Unified Cash vs Crypto Units)
         if "quantity" in order_payload:
@@ -75,7 +87,29 @@ class BinanceExecutionGateway:
             simulated_slippage_multiplier = 1 + (drift_direction * max(0.0, random_slippage))
             executed_price = base_price * simulated_slippage_multiplier
 
-            # 3. Dynamic Fee & Fill Sizing
+            # 3. High-Fidelity Execution Starvation Check
+            # We ONLY cancel the order due to starvation if it was originally a MARKET order
+            if original_type == "market" and limit_price > 0.0:
+                if action == "BUY" and executed_price > limit_price:
+                    logger.warning(f"Paper Starvation: Price drifted to {executed_price:.2f} past buy collar limit {limit_price:.2f}. Order cancelled.")
+                    return {
+                        "order_id": f"SIM-{int(time.time() * 1000)}",
+                        "symbol": symbol,
+                        "action": action,
+                        "status": "CANCELLED",
+                        "execution_timestamp": int(time.time() * 1e9)
+                    }
+                elif action == "SELL" and executed_price < limit_price:
+                    logger.warning(f"Paper Starvation: Price drifted to {executed_price:.2f} past sell collar limit {limit_price:.2f}. Order cancelled.")
+                    return {
+                        "order_id": f"SIM-{int(time.time() * 1000)}",
+                        "symbol": symbol,
+                        "action": action,
+                        "status": "CANCELLED",
+                        "execution_timestamp": int(time.time() * 1e9)
+                    }
+
+            # 4. Dynamic Fee & Fill Sizing
             fee_rate = SIM_MAKER_FEE_RATE if order_type == "limit" else SIM_TAKER_FEE_RATE
             fee_paid = notional * fee_rate
 

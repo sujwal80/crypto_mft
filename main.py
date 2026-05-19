@@ -115,7 +115,8 @@ async def trading_supervisor_loop(
                     "symbol": tick.symbol,
                     "action": "SELL" if action == "BUY" else "BUY",
                     "quantity": abs(crypto_units),
-                    "type": "market"
+                    "type": "market",
+                    "mid_price": mid_price
                 }
 
                 execution_report = await oms.process_approved_order(exit_order)

@@ -38,23 +38,25 @@ class OrderManagementSystem:
 
     async def liquidate_all(self, current_inventory: Dict[str, float]):
         """
-        Emergency fail-safe liquidation handler. Flattens all inventories instantly to cash.
+        Emergency fail-safe liquidation handler. Flattens all inventories (longs and shorts) instantly to cash.
 
         Args:
             current_inventory: Reference dictionary containing symbol string keys mapped to float quantities.
         """
         logger.critical("🚨 INITIATING FAIL-SAFE EMERGENCY LIQUIDATION (FLATTENING INVENTORY...)")
         for symbol, crypto_units in current_inventory.items():
-            if crypto_units > 0.0:
-                logger.warning(f"⚠️ Open position detected for {symbol} ({crypto_units:.6f} units). Executing market sell...")
+            if crypto_units != 0.0:
+                action = "SELL" if crypto_units > 0.0 else "BUY"
+                qty = abs(crypto_units)
+                logger.warning(f"⚠️ Open position detected for {symbol} ({crypto_units:.6f} units). Executing market {action}...")
                 emergency_order = {
                     "symbol": symbol,
-                    "action": "SELL",
-                    "quantity": crypto_units,
+                    "action": action,
+                    "quantity": qty,
                     "type": "market"
                 }
                 try:
                     await self.gateway.send_order(emergency_order)
-                    logger.info(f"Emergency liquidation market sell successfully routed for {symbol}.")
+                    logger.info(f"Emergency liquidation market {action} successfully routed for {symbol}.")
                 except Exception as e:
                     logger.critical(f"🛑 CRITICAL: EMERGENCY LIQUIDATION ROUTE FAILED FOR {symbol}: {e}!")
