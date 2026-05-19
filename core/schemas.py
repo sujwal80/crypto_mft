@@ -22,3 +22,12 @@ class BinanceDepthPayload(BaseModel):
     s: str # Symbol
     b: List[BinanceDepthEntry] # Bids
     a: List[BinanceDepthEntry] # Asks
+
+class BinanceBookTickerPayload(BaseModel):
+    """Validates incoming Binance bookTicker payload."""
+    u: int # order book updateId
+    s: str # symbol
+    b: str # best bid price
+    B: str # best bid qty
+    a: str # best ask price
+    A: str # best ask qty

@@ -4,12 +4,15 @@ import os
 import sys
 import time
 import json
+import gc
 from typing import Dict, Optional
 
 from core.schemas import InternalTick
 from ingestion.binance_adapter import BinanceCryptoAdapter
 from perception.feature_store import FeatureStore
-from intelligence.alpha_engine import AlphaModel, PortfolioOptimizer, OrderGenerator
+from intelligence.alpha_engine import AlphaModel
+from intelligence.portfolio_optimizer import PortfolioOptimizer
+from intelligence.order_generator import OrderGenerator
 from execution.dead_letter_queue import DeadLetterQueue
 from execution.execution_gateway import BinanceExecutionGateway
 from execution.risk_guardrails import RiskGuardrailEngine
@@ -23,7 +26,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("MFT_Supervisor")
 
-JOURNAL_FILE = "/usr/local/google/home/singhujwal/mft_project/trade_journal.json"
+JOURNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_journal.json")
 
 def write_to_trade_journal(record: Dict):
     """Appends a structured JSON record of every completed execution and net balance step."""
@@ -60,10 +63,12 @@ async def trading_supervisor_loop(
     # Bracket State Machine
     active_position: Optional[Dict] = None # Tracks entry metadata and limits
     cumulative_pnl = 0.0
+    ticks_processed = 0
 
     while True:
         # Phase 1: Ingestion
         tick: InternalTick = await queue.get()
+        ticks_processed += 1
         mid_price = (tick.bid + tick.ask) / 2.0
         current_time = int(time.time())
 
@@ -109,7 +114,7 @@ async def trading_supervisor_loop(
                 exit_order = {
                     "symbol": tick.symbol,
                     "action": "SELL" if action == "BUY" else "BUY",
-                    "quantity": crypto_units,
+                    "quantity": abs(crypto_units),
                     "type": "market"
                 }
 
@@ -202,7 +207,7 @@ async def trading_supervisor_loop(
                         cash_balance -= proposed_order["notional"]
                         crypto_units += net_crypto
                     else:
-                        crypto_units -= max(0.0, crypto_units - net_crypto)
+                        crypto_units -= net_crypto
                         cash_balance += net_cash
 
                     # Sync orchestrator state
@@ -235,6 +240,11 @@ async def trading_supervisor_loop(
             else:
                 logger.warning("Phase 4 [Critic] Entry Order Rejected. Checked DLQ journal.")
 
+        # Scheduled manual garbage collection when flat to prevent real-time wicks
+        if active_position is None and ticks_processed % 10000 == 0:
+            logger.debug(f"Supervisor flat. Triggering scheduled manual Garbage Collection (Ticks: {ticks_processed})...")
+            gc.collect()
+
         queue.task_done()
 
 # ==========================================
@@ -242,6 +252,10 @@ async def trading_supervisor_loop(
 # ==========================================
 async def main():
     logger.info("Initializing Enterprise Crypto MFT System - 100% LIVE TRADING MODE...")
+    
+    # Disable automatic garbage collection during real-time trading loop
+    gc.disable()
+    logger.info("Python automatic Garbage Collection disabled. Delegating to Supervisor scheduler.")
 
     PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
     WEIGHTS_PATH = os.path.join(PROJECT_DIR, "weights.lgb")

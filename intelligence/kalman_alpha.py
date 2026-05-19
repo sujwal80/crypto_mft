@@ -1,8 +1,10 @@
 import logging
+import numpy as np
+from intelligence.base_strategy import BaseAlphaStrategy
 
 logger = logging.getLogger(__name__)
 
-class KalmanFilterAlpha:
+class KalmanFilterAlpha(BaseAlphaStrategy):
     """
     State-Space estimator that calculates clean 'fair price' states under noisy L2 order book observations.
 
@@ -24,17 +26,19 @@ class KalmanFilterAlpha:
         self.r = measurement_noise
         self.initialized = False
 
-    def predict(self, mid_price: float, micro_price_drift: float) -> float:
+    def predict(self, features: np.ndarray) -> float:
         """
         Updates state spaces and estimates convergence opportunities.
 
         Args:
-            mid_price: Baseline unweighted mid-market price.
-            micro_price_drift: Divergence between volume-weighted micro-price and mid-price.
+            features: 6-dimension float array computed by FeatureStore.
 
         Returns:
             float: Alpha forecast return.
         """
+        # Unpack unified features vector
+        z_score, spread_z_score, rolling_imbalance, micro_price_drift, rolling_vol, mid_price = features
+
         if not self.initialized:
             self.x_est = mid_price
             self.initialized = True

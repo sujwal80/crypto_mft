@@ -1,8 +1,10 @@
 import logging
+import numpy as np
+from intelligence.base_strategy import BaseAlphaStrategy
 
 logger = logging.getLogger(__name__)
 
-class OrderFlowImbalanceAlpha:
+class OrderFlowImbalanceAlpha(BaseAlphaStrategy):
     """
     Order Flow Imbalance (OFI) alpha engine.
 
@@ -20,17 +22,19 @@ class OrderFlowImbalanceAlpha:
         self.sensitivity = sensitivity
         self.threshold = threshold
 
-    def predict(self, rolling_imbalance: float, micro_price_drift: float) -> float:
+    def predict(self, features: np.ndarray) -> float:
         """
         Evaluates microstructural volume flows to forecast directional breakouts.
 
         Args:
-            rolling_imbalance: Volume OBI smoothed over history.
-            micro_price_drift: Volumetric VWAP drift.
+            features: 6-dimension float array computed by FeatureStore.
 
         Returns:
             float: Alpha return forecast.
         """
+        # Unpack unified features vector
+        z_score, spread_z_score, rolling_imbalance, micro_price_drift, rolling_vol, mid_price = features
+
         # Combine LOB imbalance and micro-price drift
         flow_momentum = (rolling_imbalance * 0.6) + ((micro_price_drift * 10.0) * 0.4)
 

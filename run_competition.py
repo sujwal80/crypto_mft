@@ -34,9 +34,15 @@ def main():
     print(f"Generated {len(ticks)} high-frequency L2 test ticks successfully.\n")
 
     competitors = ["OU", "KALMAN", "OFI", "HEURISTIC"]
+    if os.path.exists("weights.lgb"):
+        competitors.append("ML")
+        print("Trained ML weights ('weights.lgb') detected. Including ML (LightGBM) in competition!")
+    else:
+        print("No trained ML weights ('weights.lgb') found. (Run 'python3 train_ml_model.py' to enable ML).")
+
     results = {}
 
-    print("Executing competitions across all models...")
+    print("\nExecuting competitions across all models...")
     for model in competitors:
         print(f"Running backtest for Competitor: [{model}]...")
         results[model] = run_competitor(model, ticks)

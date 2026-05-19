@@ -1,9 +1,10 @@
 import numpy as np
 import logging
+from intelligence.base_strategy import BaseAlphaStrategy
 
 logger = logging.getLogger(__name__)
 
-class OrnsteinUhlenbeckAlpha:
+class OrnsteinUhlenbeckAlpha(BaseAlphaStrategy):
     """
     Simulates mean-reversion paths using Ornstein-Uhlenbeck continuous stochastic differential equation physics.
 
@@ -24,18 +25,19 @@ class OrnsteinUhlenbeckAlpha:
         self.theta = theta
         self.entry_multiplier = entry_multiplier
 
-    def predict(self, z_score: float, rolling_vol: float, mid_price: float) -> float:
+    def predict(self, features: np.ndarray) -> float:
         """
         Predicts expected directional return using Ornstein-Uhlenbeck snapback boundaries.
 
         Args:
-            z_score: Deviation of current price relative to rolling lookback window.
-            rolling_vol: Standard deviation of prices over lookback window.
-            mid_price: Current baseline mid-market price.
+            features: 6-dimension float array computed by FeatureStore.
 
         Returns:
             float: Estimated expected return forecast (alpha forecast).
         """
+        # Unpack unified features vector
+        z_score, spread_z_score, rolling_imbalance, micro_price_drift, rolling_vol, mid_price = features
+
         threshold = self.entry_multiplier * rolling_vol / mid_price
 
         # Volatility circuit breaker for extreme outliers
