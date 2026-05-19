@@ -20,8 +20,8 @@ class RiskGuardrailEngine:
         """
         self.dlq = dlq
         self.max_drawdown_limit = max_drawdown_limit
-        self.daily_peak_value = 100000.0
-        self.current_portfolio_value = 100000.0
+        self.daily_peak_value = 0.0
+        self.current_portfolio_value = 0.0
 
     def validate_order(self, proposed_order: Dict, current_mid_price: float) -> bool:
         """
@@ -35,10 +35,11 @@ class RiskGuardrailEngine:
             bool: True if approved, False if rejected.
         """
         # Check 1: Daily Drawdown Circuit Breaker
-        drawdown = (self.daily_peak_value - self.current_portfolio_value) / self.daily_peak_value
-        if drawdown >= self.max_drawdown_limit:
-            self.dlq.log_rejection(proposed_order, "CRITIC REJECT: Daily drawdown limit breached.")
-            return False
+        if self.daily_peak_value > 0.0:
+            drawdown = (self.daily_peak_value - self.current_portfolio_value) / self.daily_peak_value
+            if drawdown >= self.max_drawdown_limit:
+                self.dlq.log_rejection(proposed_order, "CRITIC REJECT: Daily drawdown limit breached.")
+                return False
 
         # Check 2: Fat Finger Price Collar (max 2% deviation from current mid-market price)
         limit_price = proposed_order.get("limit_price", current_mid_price)

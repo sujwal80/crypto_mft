@@ -31,3 +31,9 @@ class BinanceBookTickerPayload(BaseModel):
     B: str # best bid qty
     a: str # best ask price
     A: str # best ask qty
+
+class BinancePartialDepthPayload(BaseModel):
+    """Validates incoming Binance partial depth payload (e.g. from @depth5 stream)."""
+    lastUpdateId: int
+    bids: List[List[str]]
+    asks: List[List[str]]

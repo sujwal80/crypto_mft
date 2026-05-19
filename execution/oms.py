@@ -29,7 +29,6 @@ class OrderManagementSystem:
         approved_order["status"] = "PENDING_SUBMIT"
         try:
             execution_report = await self.gateway.send_order(approved_order)
-            execution_report["status"] = "FILLED"
             logger.info(f"OMS EXECUTION REPORT -> {execution_report}")
             return execution_report
         except Exception as e:
@@ -53,7 +52,8 @@ class OrderManagementSystem:
                     "symbol": symbol,
                     "action": action,
                     "quantity": qty,
-                    "type": "market"
+                    "type": "market",
+                    "is_emergency": True
                 }
                 try:
                     await self.gateway.send_order(emergency_order)

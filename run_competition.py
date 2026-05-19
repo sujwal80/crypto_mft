@@ -14,8 +14,7 @@ MODEL_PARAMS = {
     "OU": {"lookback": 120, "tp_margin": 0.0120, "sl_margin": 0.0060},
     "KALMAN": {"lookback": 30, "tp_margin": 0.0120, "sl_margin": 0.0060},
     "OFI": {"lookback": 80, "tp_margin": 0.0120, "sl_margin": 0.0060},
-    "HEURISTIC": {"lookback": 120, "tp_margin": 0.0120, "sl_margin": 0.0020},
-    "DIRECTIONAL": {"lookback": 50, "tp_margin": 0.0050, "sl_margin": 999.0, "timeout_seconds": 99999999},
+    "MICRO_TREND": {"lookback": 50, "tp_margin": 0.0012, "sl_margin": 0.0004, "timeout_seconds": 240, "threshold": 0.55},
     "ML": {"lookback": 50, "tp_margin": 0.0060, "sl_margin": 0.0030}
 }
 
@@ -29,8 +28,8 @@ def run_competitor(alpha_type: str, ticks: List[InternalTick]) -> dict:
     backtester = FastBacktestEngine(
         initial_cash=10000.0,
         latency_ticks=1,
-        maker_fee=0.0010,
-        taker_fee=0.0010,
+        maker_fee=0.0002,     # Unified maker fee (0.02%)
+        taker_fee=0.0004,     # Unified taker fee (0.04%)
         slippage_std=0.0001,
         tp_margin=params.get("tp_margin"),
         sl_margin=params.get("sl_margin"),
@@ -38,7 +37,11 @@ def run_competitor(alpha_type: str, ticks: List[InternalTick]) -> dict:
         timeout_seconds=params.get("timeout_seconds")
     )
     # Override internal AlphaModel type selection
-    backtester.alpha_model = AlphaModel(alpha_type=alpha_type)
+    threshold = params.get("threshold")
+    if threshold is not None:
+        backtester.alpha_model = AlphaModel(alpha_type=alpha_type, threshold=threshold)
+    else:
+        backtester.alpha_model = AlphaModel(alpha_type=alpha_type)
 
     return backtester.run_backtest(ticks)
 
@@ -51,7 +54,7 @@ def main():
     ticks = generate_synthetic_market_data(num_ticks=15000)
     print(f"Generated {len(ticks)} high-frequency L2 test ticks successfully.\n")
 
-    competitors = ["OU", "KALMAN", "OFI", "HEURISTIC", "DIRECTIONAL"]
+    competitors = ["OU", "KALMAN", "OFI", "MICRO_TREND"]
     if os.path.exists("weights.lgb"):
         competitors.append("ML")
         print("Trained ML weights ('weights.lgb') detected. Including ML (LightGBM) in competition!")

@@ -6,7 +6,7 @@ import aiohttp
 import websockets
 from pydantic import ValidationError
 
-from core.schemas import InternalTick, BinanceBookTickerPayload
+from core.schemas import InternalTick, BinancePartialDepthPayload
 from core.exceptions import SchemaValidationException
 from ingestion.base_adapter import DataFeedAdapter
 from ingestion.watchdog import IngestionWatchdog
@@ -54,15 +54,15 @@ class BinanceCryptoAdapter(DataFeedAdapter):
                         
                         try:
                             # Pydantic Schema Validation
-                            payload = BinanceBookTickerPayload.model_validate_json(raw_message)
+                            payload = BinancePartialDepthPayload.model_validate_json(raw_message)
                             
                             # Extract Best Bid / Best Ask
-                            bid = float(payload.b)
-                            bid_size = float(payload.B)
-                            ask = float(payload.a)
-                            ask_size = float(payload.A)
+                            bid = float(payload.bids[0][0])
+                            bid_size = float(payload.bids[0][1])
+                            ask = float(payload.asks[0][0])
+                            ask_size = float(payload.asks[0][1])
                             
-                            # Normalize Timestamp to Epoch Nanoseconds (bookTicker has no E, so use current time)
+                            # Normalize Timestamp to Epoch Nanoseconds
                             timestamp_ns = time.time_ns()
                             
                             internal_tick = InternalTick(

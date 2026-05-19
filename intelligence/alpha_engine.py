@@ -11,13 +11,14 @@ class AlphaModel:
     Dynamic model orchestrator routing feature vectors to modular 
     predictive strategy implementations using the Strategy Factory Pattern.
     """
-    def __init__(self, model_path: str = "weights.lgb", alpha_type: str = "HEURISTIC"):
+    def __init__(self, model_path: str = "weights.lgb", alpha_type: str = "HEURISTIC", **kwargs):
         """
         Initializes AlphaModel orchestrator.
 
         Args:
             model_path: Absolute path to LightGBM binary weights.
             alpha_type: Dynamic model selector string ("ML", "OU", "KALMAN", "OFI", "HEURISTIC").
+            **kwargs: Additional strategy configurations passed to constructor.
         """
         self.model_path = model_path
         self.alpha_type = alpha_type.upper()
@@ -25,7 +26,8 @@ class AlphaModel:
         # Instantiates the active strategy dynamically using the Factory Registry
         self.active_strategy = AlphaStrategyFactory.create_strategy(
             self.alpha_type, 
-            model_path=self.model_path
+            model_path=self.model_path,
+            **kwargs
         )
 
     def predict(self, features: np.ndarray) -> float:

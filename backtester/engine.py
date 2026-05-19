@@ -24,23 +24,23 @@ class FastBacktestEngine:
         tp_margin: Optional[float] = None,
         sl_margin: Optional[float] = None,
         lookback: Optional[int] = None,
-        timeout_seconds: Optional[int] = None
+        reversal_threshold: Optional[float] = None
     ):
         self.initial_cash = initial_cash
         self.latency_ticks = latency_ticks
         self.maker_fee = maker_fee
         self.taker_fee = taker_fee
         self.slippage_std = slippage_std
+        self.reversal_threshold = reversal_threshold
         
         # Instantiate pipeline components
         self.feature_store = FeatureStore(window_size=1000, lookback=lookback if lookback is not None else 50)
-        self.alpha_model = AlphaModel(alpha_type="HEURISTIC")
+        self.alpha_model = AlphaModel(alpha_type="OU")
         self.optimizer = PortfolioOptimizer()
         
         order_gen_kwargs = {}
         if tp_margin is not None: order_gen_kwargs['tp_margin'] = tp_margin
         if sl_margin is not None: order_gen_kwargs['sl_margin'] = sl_margin
-        if timeout_seconds is not None: order_gen_kwargs['timeout_seconds'] = timeout_seconds
         self.order_generator = OrderGenerator(**order_gen_kwargs)
         
         # Mock DLQ so we don't write json files during fast backtesting if unnecessary
@@ -84,6 +84,14 @@ class FastBacktestEngine:
             self.risk_critic.daily_peak_value = peak_equity
             self.risk_critic.current_portfolio_value = equity
 
+            # A. Real-Time Perception and Intelligence (Extract features and predict signal on every tick)
+            features = self.feature_store.process_tick(tick)
+            alpha_forecast = 0.0
+            rolling_vol = 0.0
+            if features is not None:
+                z_score, spread, rolling_imbalance, micro_price_drift, rolling_vol, mid_price = features
+                alpha_forecast = self.alpha_model.predict(features)
+
             # ------------------------------------------------------------------
             # 1. Monitor Active Bracket Position for exits
             # ------------------------------------------------------------------
@@ -94,7 +102,6 @@ class FastBacktestEngine:
                 # Check exit breaches
                 is_tp_breached = False
                 is_sl_breached = False
-                is_timeout = (idx - active_position["entry_tick_idx"]) >= (bracket["timeout_seconds"] / 0.1) # 100ms per tick spacing
                 
                 if action == "BUY":
                     is_tp_breached = mid_price >= bracket["take_profit_price"]
@@ -103,7 +110,15 @@ class FastBacktestEngine:
                     is_tp_breached = mid_price <= bracket["take_profit_price"]
                     is_sl_breached = mid_price >= bracket["stop_loss_price"]
 
-                if is_tp_breached or is_sl_breached or is_timeout:
+                # Refinement: Dynamic Signal-Based Reversal Exit
+                is_reversal = False
+                if self.reversal_threshold is not None and features is not None:
+                    if action == "BUY":
+                        is_reversal = alpha_forecast <= -self.reversal_threshold
+                    else:
+                        is_reversal = alpha_forecast >= self.reversal_threshold
+
+                if is_tp_breached or is_sl_breached or is_reversal:
                     # Position Exit triggered!
                     # Simulate instant taker market order close
                     # Slippage modeling on Taker Order close
@@ -175,6 +190,7 @@ class FastBacktestEngine:
                     slippage_multiplier = 1 + (drift_direction * max(0.0, random_slippage))
                     executed_price = limit_price * slippage_multiplier
 
+                    # Maker exit modeling for winning limit fills if configured
                     fee_rate = self.maker_fee
                     fee_paid = notional * fee_rate
                     total_fees += fee_paid
@@ -193,8 +209,7 @@ class FastBacktestEngine:
                             "bracket": {
                                 "entry_price": executed_price,
                                 "take_profit_price": executed_price * (1.0 + self.order_generator.tp_margin),
-                                "stop_loss_price": executed_price * (1.0 - self.order_generator.sl_margin),
-                                "timeout_seconds": proposed_order["bracket"]["timeout_seconds"]
+                                "stop_loss_price": executed_price * (1.0 - self.order_generator.sl_margin)
                             }
                         }
                     else: # SELL (short position)
@@ -210,8 +225,7 @@ class FastBacktestEngine:
                             "bracket": {
                                 "entry_price": executed_price,
                                 "take_profit_price": executed_price * (1.0 - self.order_generator.tp_margin),
-                                "stop_loss_price": executed_price * (1.0 + self.order_generator.sl_margin),
-                                "timeout_seconds": proposed_order["bracket"]["timeout_seconds"]
+                                "stop_loss_price": executed_price * (1.0 + self.order_generator.sl_margin)
                             }
                         }
                     
@@ -226,29 +240,24 @@ class FastBacktestEngine:
             # 3. Generate Signal & Propose Bracket Entry
             # ------------------------------------------------------------------
             # Only allow entry if flat and no pending order is in the pipeline
-            if active_position is None and len(pending_orders) == 0:
-                features = self.feature_store.process_tick(tick)
-                if features is not None:
-                    alpha_forecast = self.alpha_model.predict(features)
-                    target_weight = self.optimizer.calculate_target_weight(alpha_forecast)
-                    
-                    proposed_order = self.order_generator.generate_bracket_order(
-                        symbol=tick.symbol,
-                        target_weight=target_weight,
-                        portfolio_value=equity,
-                        bid=tick.bid,
-                        ask=tick.ask
-                    )
+            if active_position is None and len(pending_orders) == 0 and features is not None:
+                target_weight = self.optimizer.calculate_target_weight(alpha_forecast)
+                
+                proposed_order = self.order_generator.generate_bracket_order(
+                    symbol=tick.symbol,
+                    target_weight=target_weight,
+                    portfolio_value=equity,
+                    bid=tick.bid,
+                    ask=tick.ask,
+                    volatility=rolling_vol / mid_price
+                )
 
-                    if proposed_order:
-                        # Validate through Risk Guardrail Engine
-                        if self.risk_critic.validate_order(proposed_order, mid_price):
-                            # Add to pending latency queue
-                            fill_tick_idx = idx + self.latency_ticks
-                            pending_orders.append((fill_tick_idx, proposed_order, mid_price))
-            else:
-                # Even if not proposing order, we must feed the feature store to maintain historical window
-                self.feature_store.process_tick(tick)
+                if proposed_order:
+                    # Validate through Risk Guardrail Engine
+                    if self.risk_critic.validate_order(proposed_order, mid_price):
+                        # Add to pending latency queue
+                        fill_tick_idx = idx + self.latency_ticks
+                        pending_orders.append((fill_tick_idx, proposed_order, mid_price))
 
         # Wrap up and compute analytics
         final_balance = equity

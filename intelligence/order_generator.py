@@ -5,18 +5,16 @@ class OrderGenerator:
     """
     Generates bracket entry orders consisting of entry, Take-Profit, and Stop-Loss limits.
     """
-    def __init__(self, tp_margin: float = 0.006, sl_margin: float = 0.003, timeout_seconds: int = 1800):
+    def __init__(self, tp_margin: float = 0.006, sl_margin: float = 0.003):
         """
         Initializes OrderGenerator.
         
         Args:
             tp_margin: Take Profit percentage boundary (default 0.6%).
             sl_margin: Stop Loss percentage boundary (default 0.3%).
-            timeout_seconds: Position maximum duration in seconds (default 30 mins).
         """
         self.tp_margin = tp_margin
         self.sl_margin = sl_margin
-        self.timeout_seconds = timeout_seconds
 
     def generate_bracket_order(
         self,
@@ -24,7 +22,8 @@ class OrderGenerator:
         target_weight: float,
         portfolio_value: float,
         bid: float,
-        ask: float
+        ask: float,
+        volatility: Optional[float] = None
     ) -> Optional[Dict]:
         """
         Generates proposed entry bracket order dictionary.
@@ -40,12 +39,21 @@ class OrderGenerator:
 
         limit_price = bid if action == "BUY" else ask
 
+        # Dynamic Volatility Scaling (Refinement 2)
+        tp_margin = self.tp_margin
+        sl_margin = self.sl_margin
+        if volatility is not None and volatility > 0.0:
+            # Normalize volatility against a 1.5 bps baseline
+            scale_factor = volatility / 0.00015
+            tp_margin = max(0.0002, self.tp_margin * scale_factor)  # Floor TP at 2 bps
+            sl_margin = max(0.0001, self.sl_margin * scale_factor)  # Floor SL at 1 bps
+
         if action == "BUY":
-            take_profit_price = limit_price * (1.0 + self.tp_margin)
-            stop_loss_price = limit_price * (1.0 - self.sl_margin)
+            take_profit_price = limit_price * (1.0 + tp_margin)
+            stop_loss_price = limit_price * (1.0 - sl_margin)
         else: # SELL
-            take_profit_price = limit_price * (1.0 - self.tp_margin)
-            stop_loss_price = limit_price * (1.0 + self.sl_margin)
+            take_profit_price = limit_price * (1.0 - tp_margin)
+            stop_loss_price = limit_price * (1.0 + sl_margin)
 
         return {
             "symbol": symbol,
@@ -56,7 +64,6 @@ class OrderGenerator:
             "bracket": {
                 "entry_price": limit_price,
                 "take_profit_price": take_profit_price,
-                "stop_loss_price": stop_loss_price,
-                "timeout_seconds": self.timeout_seconds
+                "stop_loss_price": stop_loss_price
             }
         }

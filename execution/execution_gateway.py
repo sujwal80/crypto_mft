@@ -50,7 +50,8 @@ class BinanceExecutionGateway:
         mid_price = order_payload.get("mid_price", limit_price if limit_price > 0.0 else 65000.0)
 
         # Unified Slippage Control: Convert market orders into protective collared limit orders
-        if order_type == "market":
+        is_emergency = order_payload.get("is_emergency", False)
+        if order_type == "market" and not is_emergency:
             if action == "BUY":
                 limit_price = mid_price * (1.0 + self.max_slippage_pct)
             else:
@@ -89,7 +90,7 @@ class BinanceExecutionGateway:
 
             # 3. High-Fidelity Execution Starvation Check
             # We ONLY cancel the order due to starvation if it was originally a MARKET order
-            if original_type == "market" and limit_price > 0.0:
+            if original_type == "market" and limit_price > 0.0 and not is_emergency:
                 if action == "BUY" and executed_price > limit_price:
                     logger.warning(f"Paper Starvation: Price drifted to {executed_price:.2f} past buy collar limit {limit_price:.2f}. Order cancelled.")
                     return {

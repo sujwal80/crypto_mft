@@ -109,12 +109,11 @@ class FeatureStore:
 
         # Z-Score of current price relative to rolling window
         z_score = (mid_price - rolling_mean) / (rolling_vol + 1e-8)
-        spread_z_score = (spread - rolling_spread_mean) / (rolling_spread_std + 1e-8)
 
         # Unified Feature Vector (Output matches our ML input requirements)
         return np.array([
             z_score,              # Mean Reversion indicator
-            spread_z_score,       # Liquidity / Spread indicator
+            spread,               # Raw Spread indicator
             rolling_imbalance,    # Volume order flow trend
             micro_price_drift,    # Micro-price prediction signal
             rolling_vol,          # Local volatility / Risk scaling

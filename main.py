@@ -6,6 +6,10 @@ import time
 import json
 import gc
 from typing import Dict, Optional
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 from core.schemas import InternalTick
 from ingestion.binance_adapter import BinanceCryptoAdapter
@@ -27,12 +31,21 @@ logging.basicConfig(
 logger = logging.getLogger("MFT_Supervisor")
 
 JOURNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_journal.json")
+SUCCESS_JOURNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "success_trade_journal.json")
+UNSUCCESS_JOURNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "unsuccess_trade_journal.json")
 
 def write_to_trade_journal(record: Dict):
     """Appends a structured JSON record of every completed execution and net balance step."""
     try:
+        # Write to master journal
         with open(JOURNAL_FILE, "a") as f:
             f.write(json.dumps(record) + "\n")
+            
+        # If it is an EXIT record, route to success/unsuccess journals
+        if record.get("action", "").startswith("EXIT_"):
+            target_file = SUCCESS_JOURNAL_FILE if record.get("trade_pnl", 0.0) > 0.0 else UNSUCCESS_JOURNAL_FILE
+            with open(target_file, "a") as f:
+                f.write(json.dumps(record) + "\n")
     except Exception as e:
         logger.error(f"Failed to write to trade journal: {e}")
 
@@ -49,7 +62,8 @@ async def trading_supervisor_loop(
     risk_critic: RiskGuardrailEngine,
     oms: OrderManagementSystem,
     initial_portfolio_value: float,
-    current_inventory: Dict[str, float]
+    current_inventory: Dict[str, float],
+    reversal_threshold: Optional[float] = None
 ):
     """Consumes ticks, monitors active bracket limits (TP/SL/Timeout), and triggers automatic exits."""
     logger.info(f"Bracket-Trading Supervisor Loop fully wired. Active Alpha: [{alpha_model.alpha_type}]")
@@ -81,6 +95,17 @@ async def trading_supervisor_loop(
 
         logger.debug(f"Balance: ${portfolio_value:.2f} | Cash: ${cash_balance:.2f} | Crypto: {crypto_units:.6f} units")
 
+        # Initialize loop-local proposed order variable to prevent UnboundLocalError
+        proposed_order = None
+
+        # A. Real-Time Perception and Intelligence (Extract features and predict signal on every tick)
+        features = feature_store.process_tick(tick)
+        alpha_forecast = 0.0
+        rolling_vol = 0.0
+        if features is not None:
+            z_score, spread, rolling_imbalance, micro_price_drift, rolling_vol, mid_price = features
+            alpha_forecast = alpha_model.predict(features)
+
         # ==============================================================
         # # A. ACTIVE BRACKET POSITION MONITORING (EXIT CHANNEL)
         # ==============================================================
@@ -88,10 +113,9 @@ async def trading_supervisor_loop(
             bracket = active_position["bracket"]
             action = active_position["action"]
 
-            # Check Exit Conditions (Take Profit, Stop Loss, or Timeout)
+            # Check Exit Conditions (Take Profit or Stop Loss)
             is_tp_breached = False
             is_sl_breached = False
-            is_timeout_breached = (current_time - active_position["entry_timestamp"]) >= bracket["timeout_seconds"]
 
             if action == "BUY": # Long Position
                 is_tp_breached = mid_price >= bracket["take_profit_price"]
@@ -100,13 +124,23 @@ async def trading_supervisor_loop(
                 is_tp_breached = mid_price <= bracket["take_profit_price"]
                 is_sl_breached = mid_price >= bracket["stop_loss_price"]
 
-            if is_tp_breached or is_sl_breached or is_timeout_breached:
+            # Refinement: Dynamic Signal-Based Reversal Exit
+            is_reversal_breached = False
+            if reversal_threshold is not None and features is not None:
+                if action == "BUY":
+                    is_reversal_breached = alpha_forecast <= -reversal_threshold
+                else:
+                    is_reversal_breached = alpha_forecast >= reversal_threshold
+
+            if is_tp_breached or is_sl_breached or is_reversal_breached:
                 # Resolve Exit Rationale
-                exit_reason = "TIMEOUT (30M EXPIRED)"
+                exit_reason = "SIGNAL_REVERSAL"
                 if is_tp_breached:
                     exit_reason = "TAKE_PROFIT"
                 elif is_sl_breached:
                     exit_reason = "STOP_LOSS"
+                elif is_reversal_breached:
+                    exit_reason = "SIGNAL_REVERSAL"
 
                 logger.warning(f"🚨 BRACKET EXIT TRIGGERED -> Reason: {exit_reason} | Mid: {mid_price:.2f}")
 
@@ -116,7 +150,8 @@ async def trading_supervisor_loop(
                     "action": "SELL" if action == "BUY" else "BUY",
                     "quantity": abs(crypto_units),
                     "type": "market",
-                    "mid_price": mid_price
+                    "mid_price": mid_price,
+                    "is_emergency": True
                 }
 
                 execution_report = await oms.process_approved_order(exit_order)
@@ -165,29 +200,26 @@ async def trading_supervisor_loop(
 
                 queue.task_done()
                 continue
+            else:
+                # Active position exists but exit boundaries are not breached. Skip entering new positions.
+                queue.task_done()
+                continue
 
         # ==============================================================
         # # B. SIGNAL EVALUATION & BRACKET ENTRY
         # ==============================================================
-        features = feature_store.process_tick(tick)
-        if features is None:
-            queue.task_done()
-            continue
+        if active_position is None and features is not None:
+            target_weight = optimizer.calculate_target_weight(alpha_forecast)
 
-        logger.info(f"Phase 2 [Perception] Feature Vector: {features}")
-
-        # Phase 3: Intelligence
-        alpha_forecast = alpha_model.predict(features)
-        target_weight = optimizer.calculate_target_weight(alpha_forecast)
-
-        # Attempt to generate a new bracket order
-        proposed_order = order_generator.generate_bracket_order(
-            symbol=tick.symbol,
-            target_weight=target_weight,
-            portfolio_value=portfolio_value,
-            bid=tick.bid,
-            ask=tick.ask
-        )
+            # Attempt to generate a new bracket order
+            proposed_order = order_generator.generate_bracket_order(
+                symbol=tick.symbol,
+                target_weight=target_weight,
+                portfolio_value=portfolio_value,
+                bid=tick.bid,
+                ask=tick.ask,
+                volatility=rolling_vol / mid_price
+            )
 
         if proposed_order:
             logger.info(f"🔮 STRATEGY ENTRY PROPOSED -> {proposed_order}")
@@ -221,8 +253,7 @@ async def trading_supervisor_loop(
                     logger.info(
                         f"🚀 BRACKET POSITION INITIALIZED -> Entry: {active_position['bracket']['entry_price']:.2f} | "
                         f"TP Target: {active_position['bracket']['take_profit_price']:.2f} | "
-                        f"SL Guard: {active_position['bracket']['stop_loss_price']:.2f} | "
-                        f"TO Limits: {active_position['bracket']['timeout_seconds']}s"
+                        f"SL Guard: {active_position['bracket']['stop_loss_price']:.2f}"
                     )
 
                     # Journal Entry
@@ -286,7 +317,12 @@ async def main():
     # Dynamically configure active forecast model selection (ML, OU, KALMAN, OFI)
     alpha_model = AlphaModel(model_path=WEIGHTS_PATH, alpha_type=ALPHA_MODEL_TYPE)
     optimizer = PortfolioOptimizer()
-    order_generator = OrderGenerator()
+    TP_MARGIN = float(os.getenv("TP_MARGIN", "0.0005"))
+    SL_MARGIN = float(os.getenv("SL_MARGIN", "0.0003"))
+    REVERSAL_THRESHOLD = os.getenv("REVERSAL_THRESHOLD")
+    REVERSAL_THRESHOLD = float(REVERSAL_THRESHOLD) if REVERSAL_THRESHOLD is not None else None
+    
+    order_generator = OrderGenerator(tp_margin=TP_MARGIN, sl_margin=SL_MARGIN)
 
     dlq = DeadLetterQueue(journal_path=DLQ_PATH)
     risk_critic = RiskGuardrailEngine(dlq=dlq, max_drawdown_limit=0.05)
@@ -295,12 +331,13 @@ async def main():
 
     current_inventory: Dict[str, float] = {SYMBOL: 0.0}
 
-    # Initialize clean trade journal file for the run session
-    try:
-        with open(JOURNAL_FILE, "w") as f:
-            f.write("") # Overwrite with clean journal
-    except Exception:
-        pass
+    # Initialize clean trade journal files for the run session
+    for path in [JOURNAL_FILE, SUCCESS_JOURNAL_FILE, UNSUCCESS_JOURNAL_FILE]:
+        try:
+            with open(path, "w") as f:
+                f.write("") # Overwrite with clean journal
+        except Exception:
+            pass
 
     try:
         logger.info(f"Launching supervisor with Alpha Model: [{ALPHA_MODEL_TYPE}]...")
@@ -315,7 +352,8 @@ async def main():
                 risk_critic=risk_critic,
                 oms=oms,
                 initial_portfolio_value=INITIAL_PORTFOLIO_VALUE,
-                current_inventory=current_inventory
+                current_inventory=current_inventory,
+                reversal_threshold=REVERSAL_THRESHOLD
             )
         )
     except asyncio.CancelledError:
