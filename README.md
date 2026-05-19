@@ -8,27 +8,28 @@ This repository contains a highly modular, production-grade Medium-Frequency Tra
 
 ```mermaid
 graph TD
-    subgraph Ingestion Layer
+    subgraph Ingestion Layer [Ingestion Layer]
         WSS[Binance WSS Adapter] --> Watchdog[Ingestion Watchdog]
-        Watchdog --> REST Backfill --> Queue[asyncio.Queue]
+        Watchdog --> REST[REST Backfill]
+        REST --> Queue[asyncio.Queue]
         WSS --> Queue
     end
 
-    subgraph Perception Layer
+    subgraph Perception Layer [Perception Layer]
         Queue --> LOB[FeatureStore LOB Normalizer]
         LOB --> Feat[Rolling L2 Microstructural Features: OBI, Micro-Price, Vol]
     end
 
-    subgraph Intelligence Layer AI Maker
-        Feat --> Alpha[AlphaModel ML / OU / Kalman / OFI Router]
-        Alpha --> Opt[PortfolioOptimizer Kelly Sizing]
-        Opt --> OrderGen[OrderGenerator Bracket Targets]
+    subgraph Intelligence Layer [Intelligence Layer: AI Maker]
+        Feat --> Alpha[AlphaModel: ML / OU / Kalman / OFI Router]
+        Alpha --> Opt[PortfolioOptimizer: Kelly Sizing]
+        Opt --> OrderGen[OrderGenerator: Bracket Targets]
     end
 
-    subgraph Execution Layer
-        OrderGen --> Critic[RiskGuardrailEngine The Critic]
+    subgraph Execution Layer [Execution Layer]
+        OrderGen --> Critic[RiskGuardrailEngine: The Critic]
         Critic -- Approved --> OMS[OrderManagementSystem]
-        Critic -- Rejected --> DLQ[DLQ Audit Journal]
+        Critic -- Rejected --> DLQ[Dead Letter Queue: Audit Journal]
         OMS --> GW[CCXT Live / Sim Gateway]
     end
 ```
