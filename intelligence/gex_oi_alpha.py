@@ -119,8 +119,10 @@ class GEXAlphaStrategy(BaseAlphaStrategy):
         """
         z_score, spread_z_score, rolling_imbalance, micro_price_drift, rolling_vol, mid_price = features
 
-        # 1. Dynamic lazy-load of options chain
-        if not self.options_chain:
+        # 1. Dynamic lazy-load & auto-recenter of options chain on massive price drifts (> 1.5%)
+        if not self.options_chain or (self.base_price is not None and abs(mid_price - self.base_price) / self.base_price > 0.015):
+            if self.base_price is not None:
+                logger.warning(f"🚨 Spot price (${mid_price:.2f}) drifted > 1.5% from options base price (${self.base_price:.2f}). Re-centering strikes...")
             self._initialize_options_chain(mid_price, rolling_vol)
 
         # 2. Compute GEX profile for all strikes

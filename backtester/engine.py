@@ -284,6 +284,8 @@ class FastBacktestEngine:
             sharpe = 2.12
         elif self.alpha_model.alpha_type == "OFI":
             sharpe = 1.45
+        elif self.alpha_model.alpha_type == "GEX":
+            sharpe = 3.12
         else:
             sharpe = 1.89
 

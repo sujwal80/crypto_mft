@@ -292,18 +292,55 @@ async def main():
     PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
     WEIGHTS_PATH = os.path.join(PROJECT_DIR, "weights.lgb")
     DLQ_PATH = os.path.join(PROJECT_DIR, "dlq_audit.json")
+    CONFIG_PATH = os.path.join(PROJECT_DIR, "config.json")
 
-    SYMBOL = "BTCUSDT"
-    BINANCE_WSS_URL = f"wss://stream.binance.com:9443/ws/{SYMBOL.lower()}@depth5@100ms"
-    BINANCE_REST_URL = f"https://api.binance.com/api/v3/depth?symbol={SYMBOL}&limit=5"
+    # 1. Check for dynamic JSON configuration file
+    config_data = {}
+    if os.path.exists(CONFIG_PATH):
+        try:
+            with open(CONFIG_PATH, "r") as f:
+                config_data = json.load(f)
+            logger.info(f"✅ Dynamically loaded configuration from JSON file: {CONFIG_PATH}")
+        except Exception as e:
+            logger.error(f"Failed to parse JSON configuration {CONFIG_PATH}: {e}. Falling back to environment...")
 
+    # Helper to resolve configuration settings (JSON -> Env -> Default fallback)
+    def get_config(section: str, key: str, env_key: str, default_val):
+        if section in config_data and key in config_data[section]:
+            val = config_data[section][key]
+            if val is not None:
+                return val
+        env_val = os.getenv(env_key)
+        if env_val is not None and str(env_val).strip() != "":
+            return env_val
+        return default_val
+
+    # 2. Map trading setup configuration and load API credentials strictly from environment variables
+    SYMBOL = get_config("trading_setup", "symbol", "SYMBOL", "BTCUSDT")
     BINANCE_API_KEY = os.getenv("BINANCE_API_KEY")
     BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET")
-    INITIAL_PORTFOLIO_VALUE = float(os.getenv("PORTFOLIO_CASH_VALUE", "10000.0"))
-    PAPER_TRADING = os.getenv("PAPER_TRADING", "False").lower() == "true"
+    
+    INITIAL_PORTFOLIO_VALUE = float(get_config("trading_setup", "portfolio_cash_value", "PORTFOLIO_CASH_VALUE", "10000.0"))
+    
+    paper_trading_val = get_config("trading_setup", "paper_trading", "PAPER_TRADING", "True")
+    if isinstance(paper_trading_val, bool):
+        PAPER_TRADING = paper_trading_val
+    else:
+        PAPER_TRADING = str(paper_trading_val).lower() == "true"
 
-    # CLI Selection parameter: default to MICRO_TREND math filter
-    ALPHA_MODEL_TYPE = os.getenv("ALPHA_MODEL_TYPE", "MICRO_TREND")
+    ALPHA_MODEL_TYPE = get_config("trading_setup", "alpha_model_type", "ALPHA_MODEL_TYPE", "MICRO_TREND").upper()
+
+    # Dynamically bind strategy-specific journal filenames inside their own folder
+    global JOURNAL_FILE, SUCCESS_JOURNAL_FILE, UNSUCCESS_JOURNAL_FILE
+    journals_dir = os.path.join(PROJECT_DIR, "journals")
+    os.makedirs(journals_dir, exist_ok=True)
+    
+    JOURNAL_FILE = os.path.join(journals_dir, f"trade_journal_{ALPHA_MODEL_TYPE}.json")
+    SUCCESS_JOURNAL_FILE = os.path.join(journals_dir, f"success_trade_journal_{ALPHA_MODEL_TYPE}.json")
+    UNSUCCESS_JOURNAL_FILE = os.path.join(journals_dir, f"unsuccess_trade_journal_{ALPHA_MODEL_TYPE}.json")
+
+    BINANCE_WSS_URL = f"wss://stream.binance.com:9443/ws/{SYMBOL.lower()}@depth5@100ms"
+    BINANCE_REST_URL = f"https://api.binance.com/api/v3/depth?symbol={SYMBOL}&limit=5"
 
     if not PAPER_TRADING and (not BINANCE_API_KEY or not BINANCE_API_SECRET):
         logger.critical("⚠️ LIVE TRADING ENABLED but BINANCE_API_KEY or BINANCE_API_SECRET is missing! Halting startup.")
@@ -314,17 +351,78 @@ async def main():
     binance_adapter = BinanceCryptoAdapter(symbol=SYMBOL, wss_url=BINANCE_WSS_URL, rest_url=BINANCE_REST_URL)
     feature_store = FeatureStore(window_size=1000)
 
-    # Dynamically configure active forecast model selection (ML, OU, KALMAN, OFI)
-    THRESHOLD = os.getenv("THRESHOLD")
-    alpha_kwargs = {}
-    if THRESHOLD is not None:
-        alpha_kwargs["threshold"] = float(THRESHOLD)
+    # 3. Resolved strategy-level parameter presets (static fallbacks)
+    HARDCODED_PRESETS = {
+        "MICRO_TREND": {
+            "tp_margin": 0.0120,
+            "sl_margin": 0.0045,
+            "threshold": 0.45,
+            "reversal_threshold": None
+        },
+        "ML": {
+            "tp_margin": 0.0060,
+            "sl_margin": 0.0030,
+            "threshold": 0.0,
+            "reversal_threshold": None
+        },
+        "GEX": {
+            "tp_margin": 0.0180,
+            "sl_margin": 0.0060,
+            "threshold": 0.3,
+            "reversal_threshold": None
+        },
+        "HYBRID": {
+            "tp_margin": 0.0180,
+            "sl_margin": 0.0060,
+            "threshold": 0.3,
+            "reversal_threshold": None
+        }
+    }
+
+    fallback_presets = HARDCODED_PRESETS.get(ALPHA_MODEL_TYPE, HARDCODED_PRESETS["MICRO_TREND"])
+
+    # Helper to resolve dynamic parameter overrides (Env -> JSON strategies block -> Static Preset fallback)
+    def resolve_param(json_key: str, env_key: str, preset_val):
+        # A. Check explicit environment variables
+        env_val = os.getenv(env_key)
+        if env_val is not None and env_val.strip() != "":
+            try:
+                return float(env_val)
+            except ValueError:
+                logger.warning(f"Could not parse {env_key}='{env_val}' as float. Falling back to JSON configuration...")
+        
+        # B. Check structured JSON strategy settings
+        if "strategies" in config_data and ALPHA_MODEL_TYPE in config_data["strategies"]:
+            strategy_block = config_data["strategies"][ALPHA_MODEL_TYPE]
+            if json_key in strategy_block and strategy_block[json_key] is not None:
+                return float(strategy_block[json_key])
+                
+        # C. Fallback to default static presets
+        return preset_val
+
+    # Resolve pipeline parameters
+    THRESHOLD = resolve_param("threshold", "THRESHOLD", fallback_presets["threshold"])
+    TP_MARGIN = resolve_param("tp_margin", "TP_MARGIN", fallback_presets["tp_margin"])
+    SL_MARGIN = resolve_param("sl_margin", "SL_MARGIN", fallback_presets["sl_margin"])
+    
+    # Resolve reversal threshold
+    REVERSAL_THRESHOLD = fallback_presets["reversal_threshold"]
+    if "strategies" in config_data and ALPHA_MODEL_TYPE in config_data["strategies"]:
+        strategy_block = config_data["strategies"][ALPHA_MODEL_TYPE]
+        if "reversal_threshold" in strategy_block and strategy_block["reversal_threshold"] is not None:
+            REVERSAL_THRESHOLD = float(strategy_block["reversal_threshold"])
+    else:
+        env_reversal = os.getenv("REVERSAL_THRESHOLD")
+        if env_reversal is not None and env_reversal.strip() != "":
+            try:
+                REVERSAL_THRESHOLD = float(env_reversal)
+            except ValueError:
+                pass
+
+    # Instantiate AlphaModel and other pipeline modules
+    alpha_kwargs = {"threshold": THRESHOLD}
     alpha_model = AlphaModel(model_path=WEIGHTS_PATH, alpha_type=ALPHA_MODEL_TYPE, **alpha_kwargs)
     optimizer = PortfolioOptimizer()
-    TP_MARGIN = float(os.getenv("TP_MARGIN", "0.0005"))
-    SL_MARGIN = float(os.getenv("SL_MARGIN", "0.0003"))
-    REVERSAL_THRESHOLD = os.getenv("REVERSAL_THRESHOLD")
-    REVERSAL_THRESHOLD = float(REVERSAL_THRESHOLD) if REVERSAL_THRESHOLD is not None else None
     
     logger.info("==========================================================")
     logger.info("🎯 LOADED PARAMETERS FROM CONFIGURATION:")

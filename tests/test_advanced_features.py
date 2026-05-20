@@ -283,3 +283,27 @@ def test_gex_strategy_registration_and_prediction():
     prediction_long = strategy.predict(features_long)
     assert prediction_long > 0.0
 
+# ==============================================================================
+# 9. Hybrid ML-GEX Strategy Verification Test
+# ==============================================================================
+def test_hybrid_strategy_registration_and_prediction():
+    from intelligence.hybrid_ml_gex_alpha import HybridMLGEXAlpha
+    
+    # Verify factory creation
+    strategy = AlphaStrategyFactory.create_strategy(
+        alpha_type="HYBRID",
+        ofi_threshold=0.3
+    )
+    
+    assert isinstance(strategy, HybridMLGEXAlpha)
+    assert strategy.ofi_threshold == 0.3
+    
+    # Verify far-from-wall fallback to ML prediction
+    features_far = np.array([0.0, 0.0, 0.0, 0.0, 0.001, 60000.0])
+    prediction = strategy.predict(features_far)
+    assert isinstance(prediction, float)
+    
+    # Verify options chain is successfully initialized under the hood
+    assert len(strategy.gex_engine.options_chain) > 0
+
+

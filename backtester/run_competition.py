@@ -16,7 +16,9 @@ from intelligence.alpha_engine import AlphaModel
 # Optimized parameters found via grid search
 MODEL_PARAMS = {
     "MICRO_TREND": {"lookback": 50, "tp_margin": 0.0120, "sl_margin": 0.0045, "timeout_seconds": 240, "threshold": 0.45, "reversal_threshold": None},
-    "ML": {"lookback": 50, "tp_margin": 0.0060, "sl_margin": 0.0030}
+    "ML": {"lookback": 50, "tp_margin": 0.0060, "sl_margin": 0.0030},
+    "GEX": {"lookback": 50, "tp_margin": 0.0180, "sl_margin": 0.0060, "threshold": 0.3},
+    "HYBRID": {"lookback": 50, "tp_margin": 0.0180, "sl_margin": 0.0060, "threshold": 0.3}
 }
 
 def run_competitor(alpha_type: str, ticks: List[InternalTick]) -> dict:
@@ -56,7 +58,7 @@ def main():
     ticks = generate_synthetic_market_data(num_ticks=15000)
     print(f"Generated {len(ticks)} high-frequency L2 test ticks successfully.\n")
 
-    competitors = ["MICRO_TREND"]
+    competitors = ["MICRO_TREND", "GEX", "HYBRID"]
     if os.path.exists("weights.lgb") or os.path.exists("weights.npy"):
         competitors.append("ML")
         print("Trained ML weights ('weights.lgb' or 'weights.npy') detected. Including ML in league!")
