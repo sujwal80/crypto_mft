@@ -240,3 +240,46 @@ async def test_emergency_liquidation_short_positions():
     assert called_payload["action"] == "BUY"
     assert called_payload["quantity"] == 0.5
     assert called_payload["type"] == "market"
+
+# ==============================================================================
+# 8. GEX Options Framework Verification Test
+# ==============================================================================
+def test_gex_strategy_registration_and_prediction():
+    from intelligence.gex_oi_alpha import GEXAlphaStrategy
+    
+    # Verify factory creation
+    strategy = AlphaStrategyFactory.create_strategy(
+        alpha_type="GEX",
+        expiry_days=7.0,
+        ofi_threshold=0.3
+    )
+    
+    assert isinstance(strategy, GEXAlphaStrategy)
+    assert strategy.ofi_threshold == 0.3
+    
+    # Verify signal computation when spot is flat/far from walls
+    features_far = np.array([0.0, 0.0, 0.0, 0.0, 0.001, 60000.0])
+    prediction = strategy.predict(features_far)
+    assert prediction == 0.0
+    
+    # Check options chain is generated
+    assert len(strategy.options_chain) > 0
+    
+    # Verify GEX wall rejection/reversal short
+    # Base price is 60000.0. Call wall is at +0.4% which is 60240.0.
+    # Proximity threshold is 0.3%, so 60234.0 is near the wall.
+    # Selling pressure: rolling_imbalance = -0.5 (< -ofi_threshold)
+    mid_price_near_wall = 60000.0 * 1.0039 # 60234.0 (near 60240.0 strike)
+    features_short = np.array([1.0, 1.0, -0.5, 0.0, 0.001, mid_price_near_wall])
+    prediction_short = strategy.predict(features_short)
+    assert prediction_short < 0.0
+    
+    # Verify GEX wall rejection/reversal long
+    # Base price is 60000.0. Put wall is at -0.4% which is 59760.0.
+    # Proximity threshold is 0.3%, so 59766.0 is near the wall.
+    # Buying pressure: rolling_imbalance = 0.5 (> ofi_threshold)
+    mid_price_near_put_wall = 60000.0 * 0.9961 # 59766.0 (near 59760.0 strike)
+    features_long = np.array([-1.0, -1.0, 0.5, 0.0, 0.001, mid_price_near_put_wall])
+    prediction_long = strategy.predict(features_long)
+    assert prediction_long > 0.0
+

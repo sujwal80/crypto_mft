@@ -3,6 +3,7 @@ from typing import Dict, Type
 from intelligence.base_strategy import BaseAlphaStrategy
 from intelligence.ml_alpha import LightGBMAlpha
 from intelligence.micro_trend_alpha import MicroTrendMomentumAlpha
+from intelligence.gex_oi_alpha import GEXAlphaStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,8 @@ class AlphaStrategyFactory:
     # Registry map of model types to their classes
     _REGISTRY: Dict[str, Type[BaseAlphaStrategy]] = {
         "ML": LightGBMAlpha,
-        "MICRO_TREND": MicroTrendMomentumAlpha
+        "MICRO_TREND": MicroTrendMomentumAlpha,
+        "GEX": GEXAlphaStrategy
     }
 
     @classmethod
