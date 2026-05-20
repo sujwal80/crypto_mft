@@ -2,9 +2,8 @@ import logging
 from typing import Dict, Type
 from intelligence.base_strategy import BaseAlphaStrategy
 from intelligence.ml_alpha import LightGBMAlpha
-from intelligence.micro_trend_alpha import MicroTrendMomentumAlpha
-from intelligence.gex_oi_alpha import GEXAlphaStrategy
 from intelligence.hybrid_ml_gex_alpha import HybridMLGEXAlpha
+from intelligence.kalman_alpha import KalmanFilterAlpha
 
 logger = logging.getLogger(__name__)
 
@@ -12,15 +11,14 @@ class AlphaStrategyFactory:
     """
     Strategy Factory pattern registry.
     Dynamically instantiates and registers alpha strategy implementations.
-    Excludes deleted legacy mathematical engines.
+    Excludes underperforming legacy mathematical engines.
     """
     
-    # Registry map of model types to their classes
+    # Registry map of active profitable model types to their classes
     _REGISTRY: Dict[str, Type[BaseAlphaStrategy]] = {
         "ML": LightGBMAlpha,
-        "MICRO_TREND": MicroTrendMomentumAlpha,
-        "GEX": GEXAlphaStrategy,
-        "HYBRID": HybridMLGEXAlpha
+        "HYBRID": HybridMLGEXAlpha,
+        "KALMAN": KalmanFilterAlpha
     }
 
     @classmethod
@@ -29,7 +27,7 @@ class AlphaStrategyFactory:
         Factory instantiation method.
         
         Args:
-            alpha_type: Upper case strategy string identifier ("ML", "MICRO_TREND").
+            alpha_type: Upper case strategy string identifier ("ML", "HYBRID", "KALMAN").
             **kwargs: Configuration parameters passed to strategy constructor.
             
         Returns:
@@ -38,8 +36,8 @@ class AlphaStrategyFactory:
         import inspect
         lookup_key = alpha_type.upper()
         if lookup_key not in cls._REGISTRY:
-            logger.error(f"Strategy type '{alpha_type}' not found in factory registry! Defaulting to MICRO_TREND.")
-            strategy_class = MicroTrendMomentumAlpha
+            logger.error(f"Strategy type '{alpha_type}' not found in factory registry! Defaulting to KALMAN.")
+            strategy_class = KalmanFilterAlpha
         else:
             strategy_class = cls._REGISTRY[lookup_key]
             

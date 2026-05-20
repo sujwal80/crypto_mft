@@ -1,7 +1,7 @@
 import numpy as np
 import logging
 from intelligence.base_strategy import BaseAlphaStrategy
-from intelligence.gex_oi_alpha import GEXAlphaStrategy
+from intelligence.legacy.gex_oi_alpha import GEXAlphaStrategy
 from intelligence.ml_alpha import LightGBMAlpha
 
 logger = logging.getLogger(__name__)
