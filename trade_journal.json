@@ -1,1 +1,1 @@
-{"timestamp": 1779263845, "symbol": "BTCUSDT", "action": "ENTRY_SELL", "reason": "STRATEGY SIGNAL", "entry_price": 77253.51639516668, "exit_price": 0.0, "trade_pnl": 0.0, "cumulative_pnl": 0.0, "portfolio_value": 10000.0, "fee_paid": 1.25}
+{"timestamp": 1779289614, "symbol": "BTCUSDT", "action": "ENTRY_BUY", "reason": "STRATEGY SIGNAL", "entry_price": 77394.32287437833, "exit_price": 0.0, "trade_pnl": 0.0, "cumulative_pnl": 0.0, "portfolio_value": 10000.0, "fee_paid": 1.25}

@@ -7,7 +7,7 @@ from typing import List
 from core.schemas import InternalTick
 from perception.feature_store import FeatureStore
 from intelligence.strategy_factory import AlphaStrategyFactory
-from intelligence.ou_alpha import OrnsteinUhlenbeckAlpha
+from intelligence.micro_trend_alpha import MicroTrendMomentumAlpha
 from intelligence.ml_alpha import LightGBMAlpha
 from execution.execution_gateway import BinanceExecutionGateway
 
@@ -46,15 +46,11 @@ class BruteForceFeatureStore:
         rolling_mean = np.mean(mids_window)
         z_score = (mid_price - rolling_mean) / (rolling_vol + 1e-8)
 
-        rolling_spread_mean = np.mean(spreads_window)
-        rolling_spread_std = np.std(spreads_window)
-        spread_z_score = (spread - rolling_spread_mean) / (rolling_spread_std + 1e-8)
-
         rolling_imbalance = np.mean(imbalances_window)
 
         return np.array([
             z_score,
-            spread_z_score,
+            spread,
             rolling_imbalance,
             micro_price_drift,
             rolling_vol,
@@ -106,18 +102,18 @@ def test_feature_store_numerical_equivalence():
 # ==============================================================================
 def test_strategy_factory_dynamic_argument_filtering():
     # Pass redundant/invalid arguments into factory
-    # OU strategy does NOT accept model_path or sensitivity in constructor
+    # MICRO_TREND strategy does NOT accept model_path or extra args in constructor
     strategy = AlphaStrategyFactory.create_strategy(
-        alpha_type="OU",
-        theta=0.20,
-        entry_multiplier=1.8,
+        alpha_type="MICRO_TREND",
+        threshold=0.45,
+        w=0.80,
         model_path="weights.lgb",     # Redundant, should be filtered out safely
-        sensitivity=0.5               # Redundant, should be filtered out safely
+        redundant_arg="hello"         # Redundant, should be filtered out safely
     )
 
-    assert isinstance(strategy, OrnsteinUhlenbeckAlpha)
-    assert strategy.theta == 0.20
-    assert strategy.entry_multiplier == 1.8
+    assert isinstance(strategy, MicroTrendMomentumAlpha)
+    assert strategy.threshold == 0.45
+    assert strategy.w == 0.80
 
     # Pass ML class weights path to factory
     ml_strategy = AlphaStrategyFactory.create_strategy(
