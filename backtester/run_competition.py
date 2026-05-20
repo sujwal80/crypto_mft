@@ -1,20 +1,21 @@
-import time
-import sys
 import os
+import sys
+# Add workspace to path
+workspace_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(workspace_path)
+
+import time
 import numpy as np
 from typing import List
 
 from core.schemas import InternalTick
-from run_backtest import generate_synthetic_market_data
+from backtester.run_backtest import generate_synthetic_market_data
 from backtester.engine import FastBacktestEngine
 from intelligence.alpha_engine import AlphaModel
 
 # Optimized parameters found via grid search
 MODEL_PARAMS = {
-    "OU": {"lookback": 120, "tp_margin": 0.0120, "sl_margin": 0.0060},
-    "KALMAN": {"lookback": 30, "tp_margin": 0.0120, "sl_margin": 0.0060},
-    "OFI": {"lookback": 80, "tp_margin": 0.0120, "sl_margin": 0.0060},
-    "MICRO_TREND": {"lookback": 50, "tp_margin": 0.0012, "sl_margin": 0.0004, "timeout_seconds": 240, "threshold": 0.55},
+    "MICRO_TREND": {"lookback": 50, "tp_margin": 0.0120, "sl_margin": 0.0045, "timeout_seconds": 240, "threshold": 0.45, "reversal_threshold": None},
     "ML": {"lookback": 50, "tp_margin": 0.0060, "sl_margin": 0.0030}
 }
 
@@ -34,6 +35,7 @@ def run_competitor(alpha_type: str, ticks: List[InternalTick]) -> dict:
         tp_margin=params.get("tp_margin"),
         sl_margin=params.get("sl_margin"),
         lookback=params.get("lookback"),
+        reversal_threshold=params.get("reversal_threshold"),
         timeout_seconds=params.get("timeout_seconds")
     )
     # Override internal AlphaModel type selection
@@ -47,29 +49,29 @@ def run_competitor(alpha_type: str, ticks: List[InternalTick]) -> dict:
 
 def main():
     print("=================================================================================")
-    print("📈 ENTERPRISE MFT - MATHEMATICAL ALPHA COMPETITION HARNESS")
+    print("📈 ENTERPRISE MFT - QUANTITATIVE MODEL LEAGUE HARNESS")
     print("=================================================================================")
 
     # 1. Generate 15,000 ticks to provide enough data for regime testing
     ticks = generate_synthetic_market_data(num_ticks=15000)
     print(f"Generated {len(ticks)} high-frequency L2 test ticks successfully.\n")
 
-    competitors = ["OU", "KALMAN", "OFI", "MICRO_TREND"]
-    if os.path.exists("weights.lgb"):
+    competitors = ["MICRO_TREND"]
+    if os.path.exists("weights.lgb") or os.path.exists("weights.npy"):
         competitors.append("ML")
-        print("Trained ML weights ('weights.lgb') detected. Including ML (LightGBM) in competition!")
+        print("Trained ML weights ('weights.lgb' or 'weights.npy') detected. Including ML in league!")
     else:
-        print("No trained ML weights ('weights.lgb') found. (Run 'python3 train_ml_model.py' to enable ML).")
+        print("No trained ML weights found. (Run 'python3 train_ml_model.py' to enable ML).")
 
     results = {}
 
-    print("\nExecuting competitions across all models...")
+    print("\nExecuting league simulations...")
     for model in competitors:
         print(f"Running backtest for Competitor: [{model}]...")
         results[model] = run_competitor(model, ticks)
 
     print("\n=================================================================================")
-    print("👑 THE MATHEMATICAL MODEL LEAGUE TABLE:")
+    print("👑 THE QUANTITATIVE MODEL LEAGUE TABLE:")
     print("=================================================================================")
     # Format Results Table
     print(f"{'Model':<12} | {'P&L ($)':<12} | {'Return (%)':<12} | {'Max DD (%)':<12} | {'Win Rate':<10} | {'Trades':<8} | {'Fees ($)':<8}")

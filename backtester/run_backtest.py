@@ -1,4 +1,9 @@
+import os
 import sys
+# Add workspace to path
+workspace_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(workspace_path)
+
 import time
 import numpy as np
 from typing import List

@@ -24,7 +24,8 @@ class FastBacktestEngine:
         tp_margin: Optional[float] = None,
         sl_margin: Optional[float] = None,
         lookback: Optional[int] = None,
-        reversal_threshold: Optional[float] = None
+        reversal_threshold: Optional[float] = None,
+        timeout_seconds: Optional[float] = None
     ):
         self.initial_cash = initial_cash
         self.latency_ticks = latency_ticks
@@ -32,10 +33,11 @@ class FastBacktestEngine:
         self.taker_fee = taker_fee
         self.slippage_std = slippage_std
         self.reversal_threshold = reversal_threshold
+        self.timeout_seconds = timeout_seconds
         
         # Instantiate pipeline components
         self.feature_store = FeatureStore(window_size=1000, lookback=lookback if lookback is not None else 50)
-        self.alpha_model = AlphaModel(alpha_type="OU")
+        self.alpha_model = AlphaModel(alpha_type="MICRO_TREND")
         self.optimizer = PortfolioOptimizer()
         
         order_gen_kwargs = {}
@@ -118,7 +120,14 @@ class FastBacktestEngine:
                     else:
                         is_reversal = alpha_forecast >= self.reversal_threshold
 
-                if is_tp_breached or is_sl_breached or is_reversal:
+                # Check timeout exit
+                is_timeout = False
+                if self.timeout_seconds is not None and "entry_timestamp_ns" in active_position:
+                    elapsed_seconds = (tick.timestamp_ns - active_position["entry_timestamp_ns"]) / 1e9
+                    if elapsed_seconds >= self.timeout_seconds:
+                        is_timeout = True
+
+                if is_tp_breached or is_sl_breached or is_reversal or is_timeout:
                     # Position Exit triggered!
                     # Simulate instant taker market order close
                     # Slippage modeling on Taker Order close
@@ -205,6 +214,7 @@ class FastBacktestEngine:
                         active_position = {
                             "action": "BUY",
                             "entry_tick_idx": idx,
+                            "entry_timestamp_ns": tick.timestamp_ns,
                             "entry_cash_spent": notional,
                             "bracket": {
                                 "entry_price": executed_price,
@@ -221,6 +231,7 @@ class FastBacktestEngine:
                         active_position = {
                             "action": "SELL",
                             "entry_tick_idx": idx,
+                            "entry_timestamp_ns": tick.timestamp_ns,
                             "entry_cash_received": notional - fee_paid,
                             "bracket": {
                                 "entry_price": executed_price,

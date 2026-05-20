@@ -9,7 +9,7 @@ from typing import Dict, Optional
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
-load_dotenv()
+load_dotenv(override=True)
 
 from core.schemas import InternalTick
 from ingestion.binance_adapter import BinanceCryptoAdapter
@@ -302,8 +302,8 @@ async def main():
     INITIAL_PORTFOLIO_VALUE = float(os.getenv("PORTFOLIO_CASH_VALUE", "10000.0"))
     PAPER_TRADING = os.getenv("PAPER_TRADING", "False").lower() == "true"
 
-    # CLI Selection parameter: default to KALMAN math filter
-    ALPHA_MODEL_TYPE = os.getenv("ALPHA_MODEL_TYPE", "KALMAN")
+    # CLI Selection parameter: default to MICRO_TREND math filter
+    ALPHA_MODEL_TYPE = os.getenv("ALPHA_MODEL_TYPE", "MICRO_TREND")
 
     if not PAPER_TRADING and (not BINANCE_API_KEY or not BINANCE_API_SECRET):
         logger.critical("⚠️ LIVE TRADING ENABLED but BINANCE_API_KEY or BINANCE_API_SECRET is missing! Halting startup.")
@@ -315,13 +315,28 @@ async def main():
     feature_store = FeatureStore(window_size=1000)
 
     # Dynamically configure active forecast model selection (ML, OU, KALMAN, OFI)
-    alpha_model = AlphaModel(model_path=WEIGHTS_PATH, alpha_type=ALPHA_MODEL_TYPE)
+    THRESHOLD = os.getenv("THRESHOLD")
+    alpha_kwargs = {}
+    if THRESHOLD is not None:
+        alpha_kwargs["threshold"] = float(THRESHOLD)
+    alpha_model = AlphaModel(model_path=WEIGHTS_PATH, alpha_type=ALPHA_MODEL_TYPE, **alpha_kwargs)
     optimizer = PortfolioOptimizer()
     TP_MARGIN = float(os.getenv("TP_MARGIN", "0.0005"))
     SL_MARGIN = float(os.getenv("SL_MARGIN", "0.0003"))
     REVERSAL_THRESHOLD = os.getenv("REVERSAL_THRESHOLD")
     REVERSAL_THRESHOLD = float(REVERSAL_THRESHOLD) if REVERSAL_THRESHOLD is not None else None
     
+    logger.info("==========================================================")
+    logger.info("🎯 LOADED PARAMETERS FROM CONFIGURATION:")
+    logger.info(f"  - ALPHA_MODEL_TYPE  : {ALPHA_MODEL_TYPE}")
+    logger.info(f"  - THRESHOLD         : {THRESHOLD}")
+    logger.info(f"  - TP_MARGIN         : {TP_MARGIN * 100:.4f}% ({TP_MARGIN})")
+    logger.info(f"  - SL_MARGIN         : {SL_MARGIN * 100:.4f}% ({SL_MARGIN})")
+    logger.info(f"  - REVERSAL_THRESHOLD: {f'{REVERSAL_THRESHOLD * 100:.4f}% ({REVERSAL_THRESHOLD})' if REVERSAL_THRESHOLD is not None else 'None (Disabled)'}")
+    logger.info(f"  - PAPER_TRADING     : {PAPER_TRADING}")
+    logger.info(f"  - INITIAL_BALANCE   : ${INITIAL_PORTFOLIO_VALUE:.2f}")
+    logger.info("==========================================================")
+
     order_generator = OrderGenerator(tp_margin=TP_MARGIN, sl_margin=SL_MARGIN)
 
     dlq = DeadLetterQueue(journal_path=DLQ_PATH)

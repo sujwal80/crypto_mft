@@ -8,14 +8,15 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("ML_Trainer")
 
+from core.schemas import InternalTick
+from perception.feature_store import FeatureStore
+from backtester.run_backtest import generate_synthetic_market_data
+
+lgb = None
 try:
     import lightgbm as lgb
-    from core.schemas import InternalTick
-    from perception.feature_store import FeatureStore
-    from run_backtest import generate_synthetic_market_data
 except (ImportError, OSError) as e:
-    logger.critical(f"Required library missing or misconfigured: {e}. (On macOS, you might need 'brew install libomp' to load LightGBM binary libraries).")
-    sys.exit(1)
+    logger.warning(f"LightGBM library failed to import: {e}. NumPy Ridge fallback training will be used.")
 
 def build_tabular_dataset(ticks, window_size: int = 1000, forward_ticks_label: int = 10):
     """
@@ -89,37 +90,52 @@ def main():
 
     logger.info(f"Training set: {X_train.shape[0]} samples | Test set: {X_test.shape[0]} samples")
 
-    # 4. Configure LightGBM Parameters
-    # Regressing forward return percentage
-    params = {
-        'objective': 'regression',
-        'metric': 'rmse',
-        'boosting_type': 'gbdt',
-        'learning_rate': 0.03,
-        'num_leaves': 31,
-        'max_depth': 6,
-        'feature_fraction': 0.8,
-        'verbose': -1
-    }
+    # 4. Train NumPy Ridge Regression Fallback Model
+    logger.info("Step 2b: Initiating NumPy Ridge Regression fallback training...")
+    X_bias = np.hstack([X_train, np.ones((X_train.shape[0], 1))])
+    lambda_val = 1.0
+    I = np.eye(X_bias.shape[1])
+    I[-1, -1] = 0.0
+    numpy_weights = np.linalg.solve(X_bias.T.dot(X_bias) + lambda_val * I, X_bias.T.dot(y_train))
+    OUTPUT_NP_WEIGHTS = "weights.npy"
+    np.save(OUTPUT_NP_WEIGHTS, numpy_weights)
+    logger.info(f"NumPy Ridge weights saved to: {os.path.abspath(OUTPUT_NP_WEIGHTS)}")
 
-    train_data = lgb.Dataset(X_train, label=y_train)
-    test_data = lgb.Dataset(X_test, label=y_test, reference=train_data)
+    # 5. Train LightGBM Booster Model if available
+    if lgb is not None:
+        params = {
+            'objective': 'regression',
+            'metric': 'rmse',
+            'boosting_type': 'gbdt',
+            'learning_rate': 0.03,
+            'num_leaves': 31,
+            'max_depth': 6,
+            'feature_fraction': 0.8,
+            'verbose': -1
+        }
 
-    # 5. Train Model
-    logger.info("Step 3: Initiating LightGBM booster training...")
-    gbm = lgb.train(
-        params,
-        train_data,
-        num_boost_round=150,
-        valid_sets=[test_data],
-        callbacks=[lgb.early_stopping(stopping_rounds=15), lgb.log_evaluation(period=25)]
-    )
+        train_data = lgb.Dataset(X_train, label=y_train)
+        test_data = lgb.Dataset(X_test, label=y_test, reference=train_data)
 
-    # 6. Save Model Weights
-    OUTPUT_WEIGHTS = "weights.lgb"
-    gbm.save_model(OUTPUT_WEIGHTS)
+        logger.info("Step 3: Initiating LightGBM booster training...")
+        try:
+            gbm = lgb.train(
+                params,
+                train_data,
+                num_boost_round=150,
+                valid_sets=[test_data],
+                callbacks=[lgb.early_stopping(stopping_rounds=15), lgb.log_evaluation(period=25)]
+            )
+            OUTPUT_WEIGHTS = "weights.lgb"
+            gbm.save_model(OUTPUT_WEIGHTS)
+            logger.info(f"👑 LIGHTGBM TRAINING COMPLETE. Weights saved to: {os.path.abspath(OUTPUT_WEIGHTS)}")
+        except Exception as e:
+            logger.error(f"LightGBM training failed: {e}. Proceeding with NumPy-only weights.")
+    else:
+        logger.info("⚠️ LightGBM not available. Skipping LightGBM training rounds.")
+
     logger.info("=======================================================================")
-    logger.info(f"👑 MODEL TRAINING COMPLETE. Weights saved to: {os.path.abspath(OUTPUT_WEIGHTS)}")
+    logger.info("👑 MODEL TRAINING COMPLETE.")
     logger.info("=======================================================================")
 
 if __name__ == "__main__":

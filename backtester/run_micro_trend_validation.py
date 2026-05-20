@@ -6,11 +6,11 @@ import numpy as np
 from typing import List, Dict
 
 # Add workspace to path
-workspace_path = "/Users/singhujwal/crypto_mft"
+workspace_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(workspace_path)
 
 from core.schemas import InternalTick
-from run_backtest import generate_synthetic_market_data
+from backtester.run_backtest import generate_synthetic_market_data
 from backtester.engine import FastBacktestEngine
 from intelligence.alpha_engine import AlphaModel
 
@@ -41,10 +41,10 @@ def run_grid_search(ticks: List[InternalTick], dataset_name: str, top_n: int = 5
     print(f"=================================================================================")
     
     # Parameter Search Space (Medium-Frequency Trend-Following Sweep: Wider margins, no timeouts)
-    thresholds = [0.20, 0.30, 0.40]
-    tp_margins = [0.0035, 0.0050, 0.0070]  # 0.35%, 0.50%, 0.70%
-    sl_margins = [0.0015, 0.0020, 0.0030]  # 0.15%, 0.20%, 0.30%
-    reversal_thresholds = [0.0010, 0.0020] # 10 bps, 20 bps reversal thresholds
+    thresholds = [0.35, 0.45, 0.55]
+    tp_margins = [0.0060, 0.0090, 0.0120]  # 0.60%, 0.90%, 1.20%
+    sl_margins = [0.0030, 0.0045, 0.0060]  # 0.30%, 0.45%, 0.60%
+    reversal_thresholds = [None, 0.0030, 0.0050] # reversal thresholds
     
     results = []
     total_runs = len(thresholds) * len(tp_margins) * len(sl_margins) * len(reversal_thresholds)

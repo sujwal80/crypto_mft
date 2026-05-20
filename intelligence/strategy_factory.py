@@ -1,9 +1,6 @@
 import logging
 from typing import Dict, Type
 from intelligence.base_strategy import BaseAlphaStrategy
-from intelligence.ou_alpha import OrnsteinUhlenbeckAlpha
-from intelligence.kalman_alpha import KalmanFilterAlpha
-from intelligence.ofi_alpha import OrderFlowImbalanceAlpha
 from intelligence.ml_alpha import LightGBMAlpha
 from intelligence.micro_trend_alpha import MicroTrendMomentumAlpha
 
@@ -13,13 +10,11 @@ class AlphaStrategyFactory:
     """
     Strategy Factory pattern registry.
     Dynamically instantiates and registers alpha strategy implementations.
+    Excludes deleted legacy mathematical engines.
     """
     
     # Registry map of model types to their classes
     _REGISTRY: Dict[str, Type[BaseAlphaStrategy]] = {
-        "OU": OrnsteinUhlenbeckAlpha,
-        "KALMAN": KalmanFilterAlpha,
-        "OFI": OrderFlowImbalanceAlpha,
         "ML": LightGBMAlpha,
         "MICRO_TREND": MicroTrendMomentumAlpha
     }
@@ -30,7 +25,7 @@ class AlphaStrategyFactory:
         Factory instantiation method.
         
         Args:
-            alpha_type: Upper case strategy string identifier ("OU", "KALMAN", "OFI", "ML").
+            alpha_type: Upper case strategy string identifier ("ML", "MICRO_TREND").
             **kwargs: Configuration parameters passed to strategy constructor.
             
         Returns:
@@ -39,8 +34,8 @@ class AlphaStrategyFactory:
         import inspect
         lookup_key = alpha_type.upper()
         if lookup_key not in cls._REGISTRY:
-            logger.error(f"Strategy type '{alpha_type}' not found in factory registry! Defaulting to OU.")
-            strategy_class = OrnsteinUhlenbeckAlpha
+            logger.error(f"Strategy type '{alpha_type}' not found in factory registry! Defaulting to MICRO_TREND.")
+            strategy_class = MicroTrendMomentumAlpha
         else:
             strategy_class = cls._REGISTRY[lookup_key]
             
