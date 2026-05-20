@@ -30,22 +30,13 @@ logging.basicConfig(
 )
 logger = logging.getLogger("MFT_Supervisor")
 
-JOURNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "trade_journal.json")
-SUCCESS_JOURNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "success_trade_journal.json")
-UNSUCCESS_JOURNAL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "unsuccess_trade_journal.json")
+JOURNAL_FILE = None
 
 def write_to_trade_journal(record: Dict):
-    """Appends a structured JSON record of every completed execution and net balance step."""
+    """Appends a structured JSON record of every completed execution and net balance step to the master ledger."""
     try:
-        # Write to master journal
         with open(JOURNAL_FILE, "a") as f:
             f.write(json.dumps(record) + "\n")
-            
-        # If it is an EXIT record, route to success/unsuccess journals
-        if record.get("action", "").startswith("EXIT_"):
-            target_file = SUCCESS_JOURNAL_FILE if record.get("trade_pnl", 0.0) > 0.0 else UNSUCCESS_JOURNAL_FILE
-            with open(target_file, "a") as f:
-                f.write(json.dumps(record) + "\n")
     except Exception as e:
         logger.error(f"Failed to write to trade journal: {e}")
 
@@ -182,9 +173,10 @@ async def trading_supervisor_loop(
                         f"Portfolio Balance: ${portfolio_value:.2f} | Fee Paid: -${fee_paid:.4f}"
                     )
 
-                    # Write full execution metrics to JSON lines journal
+                    # Write full execution metrics to JSON lines journal including active strategy model key
                     write_to_trade_journal({
                         "timestamp": int(time.time()),
+                        "model": alpha_model.alpha_type,
                         "symbol": tick.symbol,
                         "action": "EXIT_" + action,
                         "reason": exit_reason,
@@ -256,9 +248,10 @@ async def trading_supervisor_loop(
                         f"SL Guard: {active_position['bracket']['stop_loss_price']:.2f}"
                     )
 
-                    # Journal Entry
+                    # Journal Entry including active strategy model key
                     write_to_trade_journal({
                         "timestamp": int(time.time()),
+                        "model": alpha_model.alpha_type,
                         "symbol": tick.symbol,
                         "action": "ENTRY_" + action,
                         "reason": "STRATEGY SIGNAL",
@@ -331,13 +324,11 @@ async def main():
     ALPHA_MODEL_TYPE = get_config("trading_setup", "alpha_model_type", "ALPHA_MODEL_TYPE", "MICRO_TREND").upper()
 
     # Dynamically bind strategy-specific journal filenames inside their own folder
-    global JOURNAL_FILE, SUCCESS_JOURNAL_FILE, UNSUCCESS_JOURNAL_FILE
+    global JOURNAL_FILE
     journals_dir = os.path.join(PROJECT_DIR, "journals")
     os.makedirs(journals_dir, exist_ok=True)
     
     JOURNAL_FILE = os.path.join(journals_dir, f"trade_journal_{ALPHA_MODEL_TYPE}.json")
-    SUCCESS_JOURNAL_FILE = os.path.join(journals_dir, f"success_trade_journal_{ALPHA_MODEL_TYPE}.json")
-    UNSUCCESS_JOURNAL_FILE = os.path.join(journals_dir, f"unsuccess_trade_journal_{ALPHA_MODEL_TYPE}.json")
 
     BINANCE_WSS_URL = f"wss://stream.binance.com:9443/ws/{SYMBOL.lower()}@depth5@100ms"
     BINANCE_REST_URL = f"https://api.binance.com/api/v3/depth?symbol={SYMBOL}&limit=5"
@@ -444,13 +435,12 @@ async def main():
 
     current_inventory: Dict[str, float] = {SYMBOL: 0.0}
 
-    # Initialize clean trade journal files for the run session
-    for path in [JOURNAL_FILE, SUCCESS_JOURNAL_FILE, UNSUCCESS_JOURNAL_FILE]:
-        try:
-            with open(path, "w") as f:
-                f.write("") # Overwrite with clean journal
-        except Exception:
-            pass
+    # Initialize clean trade journal file for the run session
+    try:
+        with open(JOURNAL_FILE, "w") as f:
+            f.write("") # Overwrite with clean journal
+    except Exception as e:
+        logger.warning(f"Failed to clear master trade journal: {e}")
 
     try:
         logger.info(f"Launching supervisor with Alpha Model: [{ALPHA_MODEL_TYPE}]...")
