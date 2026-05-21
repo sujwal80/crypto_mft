@@ -48,8 +48,14 @@ class LightGBMAlpha(BaseAlphaStrategy):
         """
         forecast = 0.0
         
-        # Use only the first 5 features (excluding non-stationary mid_price)
-        features_stationary = features[:5]
+        z_score, spread, rolling_imbalance, micro_price_drift, rolling_vol, mid_price = features
+        
+        # Calculate momentum_score dynamically
+        normalized_drift = micro_price_drift / spread if spread > 0.0 else 0.0
+        momentum_score = (0.85 * rolling_imbalance) + (0.15 * normalized_drift)
+        
+        # Construct features_stationary (6 elements)
+        features_stationary = np.array([z_score, spread, rolling_imbalance, micro_price_drift, rolling_vol, momentum_score])
         
         # A. Try LightGBM prediction
         if self.booster is not None:

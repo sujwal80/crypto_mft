@@ -16,26 +16,20 @@ from intelligence.legacy.micro_trend_alpha import MicroTrendMomentumAlpha
 from intelligence.legacy.gex_oi_alpha import GEXAlphaStrategy
 from intelligence.base_strategy import BaseAlphaStrategy
 from intelligence.order_generator import OrderGenerator
-def load_real_market_data(filepath: str) -> List[InternalTick]:
-    """Parses JSONL file containing real-time recorded Binance L2 ticks."""
-    ticks = []
+def stream_real_market_data(filepath: str):
+    """Yields InternalTick objects line-by-line from a JSONL file, keeping RAM usage near 0 MB."""
     if not os.path.exists(filepath):
         print(f"❌ Error: Real market data file not found at: {filepath}")
-        return []
-    
-    print(f"Loading real-world depth data from: {filepath} ...")
-    start_time = time.time()
+        return
+        
     with open(filepath, "r") as f:
         for line in f:
             line_str = line.strip()
             if line_str:
                 try:
-                    tick = InternalTick.model_validate_json(line_str)
-                    ticks.append(tick)
+                    yield InternalTick.model_validate_json(line_str)
                 except Exception:
                     pass
-    print(f"Successfully loaded {len(ticks)} ticks in {time.time() - start_time:.2f}s.")
-    return ticks
 
 # Register legacy strategies dynamically in factory
 AlphaStrategyFactory._REGISTRY["MICRO_TREND"] = MicroTrendMomentumAlpha
@@ -43,9 +37,9 @@ AlphaStrategyFactory._REGISTRY["GEX_OI"] = GEXAlphaStrategy
 
 # Optimized institutional HFT parameters presets
 MODEL_PARAMS = {
-    "HYBRID": {"lookback": 50, "tp_margin": 0.0012, "sl_margin": 0.0150, "threshold": 0.3, "min_return_threshold": 0.0015, "reversal_threshold": None, "timeout_seconds": 3600},
+    "HYBRID": {"lookback": 50, "tp_margin": 0.0012, "sl_margin": 0.0150, "threshold": 0.3, "min_return_threshold": 0.0010, "reversal_threshold": None, "timeout_seconds": 3600},
     "KALMAN": {"lookback": 50, "tp_margin": 0.0012, "sl_margin": 0.0150, "threshold": 0.0008, "reversal_threshold": 0.0005, "timeout_seconds": 3600},
-    "ML": {"lookback": 50, "tp_margin": 0.0012, "sl_margin": 0.0150, "min_return_threshold": 0.0015, "reversal_threshold": None, "timeout_seconds": 3600},
+    "ML": {"lookback": 50, "tp_margin": 0.0012, "sl_margin": 0.0150, "min_return_threshold": 0.00015, "reversal_threshold": None, "timeout_seconds": 3600},
     "MICRO_TREND": {"lookback": 50, "tp_margin": 0.0012, "sl_margin": 0.0150, "threshold": 0.35, "reversal_threshold": None, "timeout_seconds": 3600},
     "GEX_OI": {"lookback": 50, "tp_margin": 0.0020, "sl_margin": 0.0150, "threshold": 0.3, "reversal_threshold": None, "timeout_seconds": 3600},
     "VOL_MICRO_TREND": {"lookback": 50, "tp_margin": 0.0012, "sl_margin": 0.0150, "threshold": 0.35, "min_return_threshold": 0.0015, "reversal_threshold": None, "timeout_seconds": 3600}
@@ -366,7 +360,7 @@ class MasterHFTBacktestEngine(FastBacktestEngine):
             "total_fees_paid": total_fees
         }
 
-def run_master_competitor(alpha_type: str, ticks: List[InternalTick], max_positions: int) -> dict:
+def run_master_competitor(alpha_type: str, filepath: str, max_positions: int) -> dict:
     np.random.seed(42)
     params = MODEL_PARAMS.get(alpha_type, {})
     
@@ -401,9 +395,61 @@ def run_master_competitor(alpha_type: str, ticks: List[InternalTick], max_positi
         fvr_limit=2.5
     )
 
-    return backtester.run_backtest(ticks)
+    ticks_generator = stream_real_market_data(filepath)
+    return backtester.run_backtest(ticks_generator)
 
 def main():
+    # 1. Targeted Model Execution Mode (via Command-Line Argument)
+    # target_model = None
+    # if len(sys.argv) > 1:
+    #     arg = sys.argv[1].upper()
+    #     valid_competitors = ["HYBRID", "KALMAN", "ML", "MICRO_TREND", "GEX_OI", "VOL_MICRO_TREND"]
+    #     if arg in valid_competitors:
+    #         target_model = arg
+            
+    # if target_model is not None:
+    #     filepath = os.path.join(workspace_path, "datasets", "futures_market_data_5days.log")
+    #     print("=================================================================================")
+    #     print(f"🎯 TARGETED 5-DAY HFT BACKTEST SESSION: [{target_model}]")
+    #     print("=================================================================================")
+    #     print(f"  - Source File: {filepath} (9.01 GB / 76.7M Ticks)")
+    #     print("=================================================================================")
+        
+    #     if not os.path.exists(filepath):
+    #         print(f"❌ Error: 5-Day Futures dataset not found at: {filepath}")
+    #         print("Please compile the dataset first.")
+    #         return
+            
+    #     print(f"\n[1/2] Executing Baseline Configuration (Max 1 Concurrent Trade)...")
+    #     start_time = time.time()
+    #     res1 = run_master_competitor(target_model, filepath, max_positions=1)
+    #     duration1 = time.time() - start_time
+        
+    #     print(f"\n[2/2] Executing Upgraded Configuration (Max 3 Concurrent Trades)...")
+    #     start_time = time.time()
+    #     res3 = run_master_competitor(target_model, filepath, max_positions=3)
+    #     duration3 = time.time() - start_time
+        
+    #     print("\n=================================================================================")
+    #     print(f"📊 TARGETED PERFORMANCE REPORT CARD: [{target_model}]")
+    #     print("=================================================================================")
+    #     print(f"1. BASELINE SETUP (MAX 1 POSITION):")
+    #     print(f"   - Net Return      : {res1['net_percentage_return']:+6.2f}% (PnL: ${res1['net_pnl']:+.2f})")
+    #     print(f"   - Total Trades    : {res1['total_trades']}")
+    #     print(f"   - Win Rate        : {res1['win_rate']:.2f}%")
+    #     print(f"   - Total Fees Paid : ${res1['total_fees_paid']:.2f}")
+    #     print(f"   - Execution Time  : {duration1:.1f}s")
+    #     print(f"---------------------------------------------------------------------------------")
+    #     print(f"2. UPGRADED SETUP (MAX 3 POSITIONS):")
+    #     print(f"   - Net Return      : {res3['net_percentage_return']:+6.2f}% (PnL: ${res3['net_pnl']:+.2f})")
+    #     print(f"   - Total Trades    : {res3['total_trades']}")
+    #     print(f"   - Win Rate        : {res3['win_rate']:.2f}%")
+    #     print(f"   - Total Fees Paid : ${res3['total_fees_paid']:.2f}")
+    #     print(f"   - Execution Time  : {duration3:.1f}s")
+    #     print("=================================================================================")
+    #     return
+
+    # 2. Standard Sweep Mode
     print("=================================================================================")
     print("📈 ENTERPRISE MFT - HIGH-FIDELITY MULTI-REGIME STRESS TEST HARNESS")
     print("=================================================================================")
@@ -416,7 +462,9 @@ def main():
         "SIDEWAYS": os.path.join(workspace_path, "datasets", "synthetic_market_data_sideways.log"),
         "SIDEWAYS_DN": os.path.join(workspace_path, "datasets", "synthetic_market_data_sideways_downtrend.log"),
         "SIDEWAYS_UP": os.path.join(workspace_path, "datasets", "synthetic_market_data_sideways_uptrend.log"),
-        "EX_UPTREND": os.path.join(workspace_path, "datasets", "synthetic_market_data_extremely_uptrend.log")
+        "EX_UPTREND": os.path.join(workspace_path, "datasets", "synthetic_market_data_extremely_uptrend.log"),
+        # Uncomment to execute heavy 5-day L2 HFT benchmark (9.01 GB / 76.7 Million Ticks):
+        # "5DAY_FUTURES": os.path.join(workspace_path, "datasets", "futures_market_data_5days.log")
     }
 
     competitors = ["HYBRID", "KALMAN", "ML", "MICRO_TREND", "GEX_OI", "VOL_MICRO_TREND"]
@@ -429,18 +477,17 @@ def main():
         print(f"\n====================================================================")
         print(f"🌐 LOADING SCENARIO: [{scenario_name}] ...")
         print(f"====================================================================")
-        ticks = load_real_market_data(filepath)
-        if not ticks:
+        if not os.path.exists(filepath):
             print(f"⚠️ Scenario [{scenario_name}] ticks missing. Skipping.")
             continue
             
         for model in competitors:
             print(f"  Executing baseline (1 Slot) for: [{model}]...")
-            res1 = run_master_competitor(model, ticks, max_positions=1)
+            res1 = run_master_competitor(model, filepath, max_positions=1)
             matrix_1[model][scenario_name] = res1["net_percentage_return"]
 
             print(f"  Executing upgrade (3 Slots) for: [{model}]...")
-            res3 = run_master_competitor(model, ticks, max_positions=3)
+            res3 = run_master_competitor(model, filepath, max_positions=3)
             matrix_3[model][scenario_name] = res3["net_percentage_return"]
 
     print("\n=================================================================================")

@@ -1,10 +1,7 @@
 import logging
 from typing import Dict, Type
 from intelligence.base_strategy import BaseAlphaStrategy
-from intelligence.ml_alpha import LightGBMAlpha
 from intelligence.hybrid_ml_gex_alpha import HybridMLGEXAlpha
-from intelligence.kalman_alpha import KalmanFilterAlpha
-from intelligence.vol_micro_trend_alpha import VolMicroTrendStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -17,10 +14,7 @@ class AlphaStrategyFactory:
     
     # Registry map of active profitable model types to their classes
     _REGISTRY: Dict[str, Type[BaseAlphaStrategy]] = {
-        "ML": LightGBMAlpha,
-        "HYBRID": HybridMLGEXAlpha,
-        "KALMAN": KalmanFilterAlpha,
-        "VOL_MICRO_TREND": VolMicroTrendStrategy
+        "HYBRID": HybridMLGEXAlpha
     }
 
     @classmethod
@@ -29,7 +23,7 @@ class AlphaStrategyFactory:
         Factory instantiation method.
         
         Args:
-            alpha_type: Upper case strategy string identifier ("ML", "HYBRID", "KALMAN").
+            alpha_type: Upper case strategy string identifier ("HYBRID").
             **kwargs: Configuration parameters passed to strategy constructor.
             
         Returns:
@@ -38,8 +32,8 @@ class AlphaStrategyFactory:
         import inspect
         lookup_key = alpha_type.upper()
         if lookup_key not in cls._REGISTRY:
-            logger.error(f"Strategy type '{alpha_type}' not found in factory registry! Defaulting to KALMAN.")
-            strategy_class = KalmanFilterAlpha
+            logger.error(f"Strategy type '{alpha_type}' not found in factory registry! Defaulting to HYBRID.")
+            strategy_class = HybridMLGEXAlpha
         else:
             strategy_class = cls._REGISTRY[lookup_key]
             

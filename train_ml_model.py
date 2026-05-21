@@ -86,7 +86,16 @@ def build_tabular_dataset(ticks, window_size: int = 1000, forward_ticks_label: i
             y_list.append(log_return)
             valid_indices.append(i)
 
-    X_final = X[valid_indices][:, :5]
+    X_valid = X[valid_indices]
+    
+    spread = X_valid[:, 1]
+    rolling_imbalance = X_valid[:, 2]
+    micro_price_drift = X_valid[:, 3]
+    
+    normalized_drift = np.where(spread > 0.0, micro_price_drift / spread, 0.0)
+    momentum_score = (0.85 * rolling_imbalance) + (0.15 * normalized_drift)
+    
+    X_final = np.column_stack([X_valid[:, :5], momentum_score])
     y_final = np.array(y_list)
 
     logger.info(f"Dataset compiled successfully. Features shape: {X_final.shape} | Labels shape: {y_final.shape}")
