@@ -48,11 +48,14 @@ class LightGBMAlpha(BaseAlphaStrategy):
         """
         forecast = 0.0
         
+        # Use only the first 5 features (excluding non-stationary mid_price)
+        features_stationary = features[:5]
+        
         # A. Try LightGBM prediction
         if self.booster is not None:
             try:
                 # LightGBM predicts over matrix rows. Wrap single vector in list.
-                forecast = self.booster.predict([features])[0]
+                forecast = self.booster.predict([features_stationary])[0]
             except Exception as e:
                 logger.error(f"LightGBM prediction exception: {e}")
 
@@ -60,7 +63,7 @@ class LightGBMAlpha(BaseAlphaStrategy):
         elif self.numpy_weights is not None:
             try:
                 # Prediction = w_1 * f_1 + ... + w_D * f_D + intercept
-                forecast = np.dot(features, self.numpy_weights[:-1]) + self.numpy_weights[-1]
+                forecast = np.dot(features_stationary, self.numpy_weights[:-1]) + self.numpy_weights[-1]
             except Exception as e:
                 logger.error(f"NumPy Ridge prediction exception: {e}")
 

@@ -4,6 +4,7 @@ from intelligence.base_strategy import BaseAlphaStrategy
 from intelligence.ml_alpha import LightGBMAlpha
 from intelligence.hybrid_ml_gex_alpha import HybridMLGEXAlpha
 from intelligence.kalman_alpha import KalmanFilterAlpha
+from intelligence.vol_micro_trend_alpha import VolMicroTrendStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +19,8 @@ class AlphaStrategyFactory:
     _REGISTRY: Dict[str, Type[BaseAlphaStrategy]] = {
         "ML": LightGBMAlpha,
         "HYBRID": HybridMLGEXAlpha,
-        "KALMAN": KalmanFilterAlpha
+        "KALMAN": KalmanFilterAlpha,
+        "VOL_MICRO_TREND": VolMicroTrendStrategy
     }
 
     @classmethod

@@ -7,9 +7,14 @@ from typing import List
 from core.schemas import InternalTick
 from perception.feature_store import FeatureStore
 from intelligence.strategy_factory import AlphaStrategyFactory
-from intelligence.micro_trend_alpha import MicroTrendMomentumAlpha
+from intelligence.legacy.micro_trend_alpha import MicroTrendMomentumAlpha
 from intelligence.ml_alpha import LightGBMAlpha
 from execution.execution_gateway import BinanceExecutionGateway
+from intelligence.legacy.gex_oi_alpha import GEXAlphaStrategy
+
+# Dynamically register legacy strategies for factory tests
+AlphaStrategyFactory._REGISTRY["MICRO_TREND"] = MicroTrendMomentumAlpha
+AlphaStrategyFactory._REGISTRY["GEX"] = GEXAlphaStrategy
 
 # ==============================================================================
 # 1. Brute-Force Reference Feature Store (For Mathematical Equivalence validation)
@@ -245,7 +250,7 @@ async def test_emergency_liquidation_short_positions():
 # 8. GEX Options Framework Verification Test
 # ==============================================================================
 def test_gex_strategy_registration_and_prediction():
-    from intelligence.gex_oi_alpha import GEXAlphaStrategy
+    from intelligence.legacy.gex_oi_alpha import GEXAlphaStrategy
     
     # Verify factory creation
     strategy = AlphaStrategyFactory.create_strategy(

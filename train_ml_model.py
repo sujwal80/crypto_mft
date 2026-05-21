@@ -12,6 +12,27 @@ from core.schemas import InternalTick
 from perception.feature_store import FeatureStore
 from backtester.run_backtest import generate_synthetic_market_data
 
+def load_ticks_from_file(filepath: str) -> list:
+    """Parses JSONL file containing recorded Binance L2 ticks."""
+    ticks = []
+    if not os.path.exists(filepath):
+        logger.error(f"Dataset file not found at: {filepath}")
+        return []
+    
+    logger.info(f"Loading depth ticks from: {filepath} ...")
+    start_time = time.time()
+    with open(filepath, "r") as f:
+        for line in f:
+            line_str = line.strip()
+            if line_str:
+                try:
+                    tick = InternalTick.model_validate_json(line_str)
+                    ticks.append(tick)
+                except Exception:
+                    pass
+    logger.info(f"Successfully loaded {len(ticks)} ticks in {time.time() - start_time:.2f}s.")
+    return ticks
+
 lgb = None
 try:
     import lightgbm as lgb
@@ -65,7 +86,7 @@ def build_tabular_dataset(ticks, window_size: int = 1000, forward_ticks_label: i
             y_list.append(log_return)
             valid_indices.append(i)
 
-    X_final = X[valid_indices]
+    X_final = X[valid_indices][:, :5]
     y_final = np.array(y_list)
 
     logger.info(f"Dataset compiled successfully. Features shape: {X_final.shape} | Labels shape: {y_final.shape}")
@@ -73,9 +94,14 @@ def build_tabular_dataset(ticks, window_size: int = 1000, forward_ticks_label: i
 
 def main():
     logger.info("=======================================================================")
-    # 1. Generate large synthetic dataset for model training (25,000 ticks)
-    NUM_TICKS = 25000
-    ticks = generate_synthetic_market_data(num_ticks=NUM_TICKS)
+    # 1. Load dataset from datasets folder (default to real_market_data_live.log or custom file in sys.argv)
+    filepath = sys.argv[1] if len(sys.argv) > 1 else os.path.join("datasets", "real_market_data_live.log")
+    
+    ticks = load_ticks_from_file(filepath)
+    if not ticks:
+        logger.warning("No ticks loaded from dataset file. Falling back to synthetic market data generation...")
+        NUM_TICKS = 25000
+        ticks = generate_synthetic_market_data(num_ticks=NUM_TICKS)
     
     # 2. Extract L2 Features and generate forward return labels
     X, y = build_tabular_dataset(ticks, window_size=1000, forward_ticks_label=10)

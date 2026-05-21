@@ -12,30 +12,36 @@ from core.schemas import InternalTick
 from backtester.engine import FastBacktestEngine
 
 def generate_synthetic_market_data(num_ticks: int = 10000) -> List[InternalTick]:
-    """Generates a synthetic sequence of high-frequency ticks simulating both ranges and trend regimes."""
+    """Generates a calibrated synthetic sequence of high-frequency ticks matching real-world Binance L2 stats."""
     ticks = []
-    base_price = 65000.0
+    base_price = 77500.0
     current_trend = 0.0
     np.random.seed(42)
+    
+    # AR(1) price step history for return momentum (lag-1 autocorrelation ~ +0.155)
+    prev_step = 0.0
+    momentum_coeff = 0.155
 
-    print(f"Generating {num_ticks} ticks of synthetic L2 order book data...")
+    print(f"Generating {num_ticks} ticks of calibrated synthetic L2 order book data...")
 
     for i in range(num_ticks):
-        # Inject regime cycles (alternating between ranges and sharp breakout trends)
+        # Inject regime cycles (ranging vs sharp breakout trends)
         if i % 3000 == 0:
-            current_trend = np.random.choice([-0.15, 0.0, 0.15]) # Trend strength
+            # Trend strength scaled to real-world scales (0.02 basis points drift per tick)
+            current_trend = np.random.choice([-0.015, 0.0, 0.015])
 
-        # Step Price
-        price_step = np.random.normal(loc=current_trend, scale=18.0)
+        # Step Price with AR(1) return momentum model
+        noise = np.random.normal(loc=current_trend, scale=0.65)
+        price_step = (momentum_coeff * prev_step) + ((1.0 - momentum_coeff) * noise)
         base_price += price_step
+        prev_step = price_step
 
-        # Simulate Bid/Ask Spread
-        spread = np.random.uniform(0.5, 2.0)
+        # Simulate Real-World Bid/Ask Spread ($0.01 to $0.02)
+        spread = np.random.uniform(0.01, 0.02)
         bid = base_price - (spread / 2.0)
         ask = base_price + (spread / 2.0)
 
         # Simulate Volumetric Imbalance (OBI)
-        # During sharp trends, volume piles up heavily on one side
         if current_trend > 0:
             bid_size = np.random.uniform(1.5, 5.0)
             ask_size = np.random.uniform(0.1, 1.0)
