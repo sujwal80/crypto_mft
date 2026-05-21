@@ -367,6 +367,12 @@ async def main():
             "sl_margin": 0.0060,
             "threshold": 0.3,
             "reversal_threshold": None
+        },
+        "VSABS": {
+            "tp_margin": 0.0012,
+            "sl_margin": 0.0150,
+            "threshold": 0.35,
+            "reversal_threshold": None
         }
     }
 

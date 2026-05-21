@@ -2,6 +2,7 @@ import logging
 from typing import Dict, Type
 from intelligence.base_strategy import BaseAlphaStrategy
 from intelligence.hybrid_ml_gex_alpha import HybridMLGEXAlpha
+from intelligence.vsabs_alpha import VSABSAlpha
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +15,8 @@ class AlphaStrategyFactory:
     
     # Registry map of active profitable model types to their classes
     _REGISTRY: Dict[str, Type[BaseAlphaStrategy]] = {
-        "HYBRID": HybridMLGEXAlpha
+        "HYBRID": HybridMLGEXAlpha,
+        "VSABS": VSABSAlpha
     }
 
     @classmethod

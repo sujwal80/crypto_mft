@@ -2,6 +2,8 @@ import os
 import sys
 import time
 import numpy as np
+import asyncio
+from concurrent.futures import ProcessPoolExecutor
 from typing import List, Dict, Optional
 
 # Add workspace to path
@@ -14,6 +16,10 @@ from intelligence.alpha_engine import AlphaModel
 from intelligence.strategy_factory import AlphaStrategyFactory
 from intelligence.legacy.micro_trend_alpha import MicroTrendMomentumAlpha
 from intelligence.legacy.gex_oi_alpha import GEXAlphaStrategy
+from intelligence.legacy.kalman_alpha import KalmanFilterAlpha
+from intelligence.legacy.ml_alpha_model import MLAlphaModel
+from intelligence.legacy.vol_micro_trend_alpha import VolMicroTrendStrategy
+from intelligence.vsabs_alpha import VSABSAlpha
 from intelligence.base_strategy import BaseAlphaStrategy
 from intelligence.order_generator import OrderGenerator
 def stream_real_market_data(filepath: str):
@@ -34,6 +40,10 @@ def stream_real_market_data(filepath: str):
 # Register legacy strategies dynamically in factory
 AlphaStrategyFactory._REGISTRY["MICRO_TREND"] = MicroTrendMomentumAlpha
 AlphaStrategyFactory._REGISTRY["GEX_OI"] = GEXAlphaStrategy
+AlphaStrategyFactory._REGISTRY["KALMAN"] = KalmanFilterAlpha
+AlphaStrategyFactory._REGISTRY["ML"] = MLAlphaModel
+AlphaStrategyFactory._REGISTRY["VOL_MICRO_TREND"] = VolMicroTrendStrategy
+AlphaStrategyFactory._REGISTRY["VSABS"] = VSABSAlpha
 
 # Optimized institutional HFT parameters presets
 MODEL_PARAMS = {
@@ -42,7 +52,8 @@ MODEL_PARAMS = {
     "ML": {"lookback": 50, "tp_margin": 0.0012, "sl_margin": 0.0150, "min_return_threshold": 0.00015, "reversal_threshold": None, "timeout_seconds": 3600},
     "MICRO_TREND": {"lookback": 50, "tp_margin": 0.0012, "sl_margin": 0.0150, "threshold": 0.35, "reversal_threshold": None, "timeout_seconds": 3600},
     "GEX_OI": {"lookback": 50, "tp_margin": 0.0020, "sl_margin": 0.0150, "threshold": 0.3, "reversal_threshold": None, "timeout_seconds": 3600},
-    "VOL_MICRO_TREND": {"lookback": 50, "tp_margin": 0.0012, "sl_margin": 0.0150, "threshold": 0.35, "min_return_threshold": 0.0015, "reversal_threshold": None, "timeout_seconds": 3600}
+    "VOL_MICRO_TREND": {"lookback": 50, "tp_margin": 0.0012, "sl_margin": 0.0150, "threshold": 0.35, "min_return_threshold": 0.0015, "reversal_threshold": None, "timeout_seconds": 3600},
+    "VSABS": {"lookback": 50, "tp_margin": 0.0012, "sl_margin": 0.0150, "threshold": 0.35, "min_return_threshold": 0.0, "reversal_threshold": None, "timeout_seconds": 3600, "fee_rate": 0.000075, "fvr_multiplier": 2.5, "vol_ceiling": 0.0150}
 }
 
 class HFTOrderGenerator(OrderGenerator):
@@ -384,6 +395,10 @@ def run_master_competitor(alpha_type: str, filepath: str, max_positions: int) ->
     model_kwargs = {"enable_fvr": False, "min_return_threshold": min_return_threshold}
     if threshold is not None:
         model_kwargs["threshold"] = threshold
+    
+    for k, v in params.items():
+        if k not in ["tp_margin", "sl_margin", "lookback", "reversal_threshold", "timeout_seconds", "threshold", "min_return_threshold"]:
+            model_kwargs[k] = v
         
     backtester.alpha_model = AlphaModel(alpha_type=alpha_type, **model_kwargs)
 
@@ -394,61 +409,10 @@ def run_master_competitor(alpha_type: str, filepath: str, max_positions: int) ->
         f_total=0.00015,
         fvr_limit=2.5
     )
-
     ticks_generator = stream_real_market_data(filepath)
     return backtester.run_backtest(ticks_generator)
 
-def main():
-    # 1. Targeted Model Execution Mode (via Command-Line Argument)
-    # target_model = None
-    # if len(sys.argv) > 1:
-    #     arg = sys.argv[1].upper()
-    #     valid_competitors = ["HYBRID", "KALMAN", "ML", "MICRO_TREND", "GEX_OI", "VOL_MICRO_TREND"]
-    #     if arg in valid_competitors:
-    #         target_model = arg
-            
-    # if target_model is not None:
-    #     filepath = os.path.join(workspace_path, "datasets", "futures_market_data_5days.log")
-    #     print("=================================================================================")
-    #     print(f"🎯 TARGETED 5-DAY HFT BACKTEST SESSION: [{target_model}]")
-    #     print("=================================================================================")
-    #     print(f"  - Source File: {filepath} (9.01 GB / 76.7M Ticks)")
-    #     print("=================================================================================")
-        
-    #     if not os.path.exists(filepath):
-    #         print(f"❌ Error: 5-Day Futures dataset not found at: {filepath}")
-    #         print("Please compile the dataset first.")
-    #         return
-            
-    #     print(f"\n[1/2] Executing Baseline Configuration (Max 1 Concurrent Trade)...")
-    #     start_time = time.time()
-    #     res1 = run_master_competitor(target_model, filepath, max_positions=1)
-    #     duration1 = time.time() - start_time
-        
-    #     print(f"\n[2/2] Executing Upgraded Configuration (Max 3 Concurrent Trades)...")
-    #     start_time = time.time()
-    #     res3 = run_master_competitor(target_model, filepath, max_positions=3)
-    #     duration3 = time.time() - start_time
-        
-    #     print("\n=================================================================================")
-    #     print(f"📊 TARGETED PERFORMANCE REPORT CARD: [{target_model}]")
-    #     print("=================================================================================")
-    #     print(f"1. BASELINE SETUP (MAX 1 POSITION):")
-    #     print(f"   - Net Return      : {res1['net_percentage_return']:+6.2f}% (PnL: ${res1['net_pnl']:+.2f})")
-    #     print(f"   - Total Trades    : {res1['total_trades']}")
-    #     print(f"   - Win Rate        : {res1['win_rate']:.2f}%")
-    #     print(f"   - Total Fees Paid : ${res1['total_fees_paid']:.2f}")
-    #     print(f"   - Execution Time  : {duration1:.1f}s")
-    #     print(f"---------------------------------------------------------------------------------")
-    #     print(f"2. UPGRADED SETUP (MAX 3 POSITIONS):")
-    #     print(f"   - Net Return      : {res3['net_percentage_return']:+6.2f}% (PnL: ${res3['net_pnl']:+.2f})")
-    #     print(f"   - Total Trades    : {res3['total_trades']}")
-    #     print(f"   - Win Rate        : {res3['win_rate']:.2f}%")
-    #     print(f"   - Total Fees Paid : ${res3['total_fees_paid']:.2f}")
-    #     print(f"   - Execution Time  : {duration3:.1f}s")
-    #     print("=================================================================================")
-    #     return
-
+async def main():
     # 2. Standard Sweep Mode
     print("=================================================================================")
     print("📈 ENTERPRISE MFT - HIGH-FIDELITY MULTI-REGIME STRESS TEST HARNESS")
@@ -462,33 +426,46 @@ def main():
         "SIDEWAYS": os.path.join(workspace_path, "datasets", "synthetic_market_data_sideways.log"),
         "SIDEWAYS_DN": os.path.join(workspace_path, "datasets", "synthetic_market_data_sideways_downtrend.log"),
         "SIDEWAYS_UP": os.path.join(workspace_path, "datasets", "synthetic_market_data_sideways_uptrend.log"),
-        "EX_UPTREND": os.path.join(workspace_path, "datasets", "synthetic_market_data_extremely_uptrend.log"),
-        # Uncomment to execute heavy 5-day L2 HFT benchmark (9.01 GB / 76.7 Million Ticks):
-        # "5DAY_FUTURES": os.path.join(workspace_path, "datasets", "futures_market_data_5days.log")
+        "EX_UPTREND": os.path.join(workspace_path, "datasets", "extremely_uptrend.log" if not os.path.exists(os.path.join(workspace_path, "datasets", "synthetic_market_data_extremely_uptrend.log")) else os.path.join(workspace_path, "datasets", "synthetic_market_data_extremely_uptrend.log")),
     }
 
-    competitors = ["HYBRID", "KALMAN", "ML", "MICRO_TREND", "GEX_OI", "VOL_MICRO_TREND"]
+    competitors = ["HYBRID", "KALMAN", "ML", "MICRO_TREND", "GEX_OI", "VOL_MICRO_TREND", "VSABS"]
 
     # Data structures to hold returns across all scenarios
     matrix_1 = {model: {} for model in competitors}
     matrix_3 = {model: {} for model in competitors}
 
-    for scenario_name, filepath in scenarios.items():
-        print(f"\n====================================================================")
-        print(f"🌐 LOADING SCENARIO: [{scenario_name}] ...")
-        print(f"====================================================================")
-        if not os.path.exists(filepath):
-            print(f"⚠️ Scenario [{scenario_name}] ticks missing. Skipping.")
-            continue
-            
-        for model in competitors:
-            print(f"  Executing baseline (1 Slot) for: [{model}]...")
-            res1 = run_master_competitor(model, filepath, max_positions=1)
-            matrix_1[model][scenario_name] = res1["net_percentage_return"]
+    loop = asyncio.get_running_loop()
+    tasks = []
 
-            print(f"  Executing upgrade (3 Slots) for: [{model}]...")
-            res3 = run_master_competitor(model, filepath, max_positions=3)
-            matrix_3[model][scenario_name] = res3["net_percentage_return"]
+    with ProcessPoolExecutor() as executor:
+        for scenario_name, filepath in scenarios.items():
+            if not os.path.exists(filepath):
+                print(f"⚠️ Scenario [{scenario_name}] ticks missing. Skipping.")
+                continue
+            
+            for model in competitors:
+                # 1 Slot Task
+                t1 = loop.run_in_executor(executor, run_master_competitor, model, filepath, 1)
+                tasks.append((model, scenario_name, 1, t1))
+                # 3 Slots Task
+                t3 = loop.run_in_executor(executor, run_master_competitor, model, filepath, 3)
+                tasks.append((model, scenario_name, 3, t3))
+
+        print(f"⚡ Scheduled {len(tasks)} concurrent simulations across CPU cores using ProcessPoolExecutor...")
+        start_time = time.time()
+
+        # Wait and gather all tasks concurrently
+        for model, scenario_name, max_positions, t in tasks:
+            res = await t
+            if max_positions == 1:
+                matrix_1[model][scenario_name] = res["net_percentage_return"]
+            else:
+                matrix_3[model][scenario_name] = res["net_percentage_return"]
+            print(f"  ✅ Finished: {model:<15} on {scenario_name:<12} ({max_positions} Position{'s' if max_positions > 1 else ''}) | PnL: ${res['net_pnl']:+.2f} ({res['net_percentage_return']:+.2f}%)")
+
+        duration = time.time() - start_time
+        print(f"\n⚡ All parallel HFT backtests completed in {duration:.2f}s!")
 
     print("\n=================================================================================")
     print("👑 REGIME PROFITABILITY MATRIX — PART 1: baseline setup (MAX 1 CONCURRENT TRADE)")
@@ -541,4 +518,7 @@ def main():
     print("=================================================================================")
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n⚠️ Benchmark execution interrupted by user.")
