@@ -3,7 +3,7 @@
     "symbol": "BTCUSDT",
     "portfolio_cash_value": 10000.0,
     "paper_trading": true,
-    "alpha_model_type": "HYBRID"
+    "alpha_model_type": "ML"
   },
   "strategies": {
     "KALMAN": {
