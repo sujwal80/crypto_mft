@@ -1,0 +1,34 @@
+{
+  "trading_setup": {
+    "symbol": "BTCUSDT",
+    "portfolio_cash_value": 10000.0,
+    "paper_trading": true,
+    "alpha_model_type": "ML"
+  },
+  "strategies": {
+    "KALMAN": {
+      "tp_margin": 0.0060,
+      "sl_margin": 0.0030,
+      "threshold": 0.0008,
+      "reversal_threshold": null
+    },
+    "ML": {
+      "tp_margin": 0.0060,
+      "sl_margin": 0.0030,
+      "threshold": 0.0,
+      "reversal_threshold": null
+    },
+    "HYBRID": {
+      "tp_margin": 0.0180,
+      "sl_margin": 0.0060,
+      "threshold": 0.3,
+      "reversal_threshold": null
+    },
+    "VSABS": {
+      "tp_margin": 0.0012,
+      "sl_margin": 0.0150,
+      "threshold": 0.35,
+      "reversal_threshold": null
+    }
+  }
+}
