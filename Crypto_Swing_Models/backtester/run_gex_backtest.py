@@ -85,8 +85,8 @@ async def main():
     # 2. Instantiate Backtester
     engine = GexBacktestEngine(
         initial_cash=10000.0,
-        maker_fee=0.0002,
-        taker_fee=0.0005,
+        maker_fee=0.001,
+        taker_fee=0.001,
         slippage_pct=0.0003
     )
     

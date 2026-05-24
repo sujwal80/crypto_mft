@@ -83,7 +83,7 @@ class SmartRouter:
                 
             if is_filled:
                 order["status"] = "FILLED"
-                fee = order["amount"] * limit_price * 0.0002
+                fee = order["amount"] * limit_price * 0.001
                 order["fee"] = fee
                 self.trade_journal.append(order)
                 self.active_orders.remove(order)
@@ -110,8 +110,8 @@ class SmartRouter:
             # Execute as a Maker at the spread (Ask for Long exit selling, Bid for Short exit buying)
             fill_price = ref_price + 0.5 if action == "SELL" else ref_price - 0.5
             
-            # Optimized Exit Fee: drops from 0.05% (Taker) to 0.02% (Maker)!
-            fee = amount * fill_price * 0.0002
+            # Optimized Exit Fee: maker optimized exit fee set to 0.1%
+            fee = amount * fill_price * 0.001
             
             order = {
                 "order_id": f"shadow_maker_exit_{int(timestamp*1e6)}",

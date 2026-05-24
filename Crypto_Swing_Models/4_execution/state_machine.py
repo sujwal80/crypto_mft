@@ -182,10 +182,10 @@ class GexMicroStateMachine:
             return
             
         # Evaluate entry expectancy at Risk Gate
-        # Demand at least 0.2% round-trip expected move
-        expected_move = 0.0025 # 0.25% anticipated bounce from major GEX wall
+        # Demand at least 0.5% round-trip expected move
+        expected_move = 0.0050 # 0.50% anticipated bounce from major GEX wall
         if not self.risk_gate.evaluate_entry(mid_price, self.adjusted_target_price, expected_move):
-            logger.warning("Risk Gate blocked entry, locking transition.")
+            logger.debug("Risk Gate blocked entry, locking transition.")
             return
             
         # If we hit the basis-adjusted strike target, transition to State 2

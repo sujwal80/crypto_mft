@@ -10,8 +10,8 @@ class RiskGate:
     the round-trip exchange fees, estimated slippage, and required profit margin.
     """
     def __init__(self, 
-                 maker_fee_pct: float = 0.0002,   # 0.02% maker fee
-                 taker_fee_pct: float = 0.0005,   # 0.05% taker fee
+                 maker_fee_pct: float = 0.001,   # 0.1% maker fee
+                 taker_fee_pct: float = 0.001,   # 0.1% taker fee
                  expected_slippage_pct: float = 0.0003, # 0.03% expected slippage
                  minimum_net_profit_pct: float = 0.0010): # 0.10% minimum net alpha margin
                  
@@ -41,7 +41,7 @@ class RiskGate:
         # The absolute trade target must justify the friction.
         # Expected profit (expected_move_pct) must overpower total transaction costs.
         if expected_move_pct < self.required_edge:
-            logger.warning(
+            logger.debug(
                 f"RiskGate Lock: Expected move {expected_move_pct * 100:.3f}% "
                 f"fails to clear required edge threshold {self.required_edge * 100:.3f}%"
             )

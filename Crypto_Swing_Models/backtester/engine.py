@@ -36,8 +36,8 @@ class GexBacktestEngine:
     """
     def __init__(self, 
                  initial_cash: float = 10000.0,
-                 maker_fee: float = 0.0002, # 0.02% maker fee
-                 taker_fee: float = 0.0005, # 0.05% taker fee
+                 maker_fee: float = 0.001, # 0.1% maker fee
+                 taker_fee: float = 0.001, # 0.1% taker fee
                  slippage_pct: float = 0.0003,
                  grace_window_ticks: int = 3000,
                  resample_ticks: int = 1500): 
