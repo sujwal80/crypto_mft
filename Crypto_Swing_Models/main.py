@@ -4,6 +4,10 @@ import sys
 import os
 import signal
 import numpy as np
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Configure loggers for production standards
 logging.basicConfig(
@@ -364,7 +368,12 @@ class QuantSystemOrchestrator:
             logger.error(f"Failed to save live session report: {e}")
 
 async def main():
-    orchestrator = QuantSystemOrchestrator(symbol="BTCUSDT", mode="SHADOW")
+    # Read trading mode and symbol from environment variables
+    mode = os.getenv("TRADING_MODE", "SHADOW").upper()
+    symbol = os.getenv("SYMBOL", "BTCUSDT").upper()
+    
+    logger.info(f"Launching QuantSystemOrchestrator. Symbol: {symbol} | Mode: {mode}")
+    orchestrator = QuantSystemOrchestrator(symbol=symbol, mode=mode)
     
     # Handle signal terminations
     loop = asyncio.get_running_loop()
