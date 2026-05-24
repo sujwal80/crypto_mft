@@ -62,6 +62,7 @@ class QuantSystemOrchestrator:
         
         self.tasks = []
         self.ticks_processed = 0
+        self.last_journal_len = 0
 
     async def start(self):
         """Spawns all concurrent worker tasks."""
@@ -132,6 +133,12 @@ class QuantSystemOrchestrator:
                     )
                     self.ticks_processed += 1
                     
+                    # Check if a new trade exits/fills completed and save report card in real-time!
+                    current_journal_len = len(self.state_machine.smart_router.trade_journal)
+                    if current_journal_len > self.last_journal_len and current_journal_len % 2 == 0:
+                        await self._save_session_report()
+                        self.last_journal_len = current_journal_len
+                    
                 self.binance_depth_queue.task_done()
             except asyncio.CancelledError:
                 break
@@ -161,6 +168,12 @@ class QuantSystemOrchestrator:
                     is_buyer_maker=is_buyer_maker
                 )
                 self.ticks_processed += 1
+                
+                # Check if a new trade exits/fills completed and save report card in real-time!
+                current_journal_len = len(self.state_machine.smart_router.trade_journal)
+                if current_journal_len > self.last_journal_len and current_journal_len % 2 == 0:
+                    await self._save_session_report()
+                    self.last_journal_len = current_journal_len
                 
                 self.binance_trade_queue.task_done()
             except asyncio.CancelledError:

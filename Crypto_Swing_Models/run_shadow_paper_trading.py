@@ -47,6 +47,7 @@ class HistoricTickPlayer:
         # Memory states for GEX updates
         self.last_gex_update_ns = None
         self.last_print_time = 0.0
+        self.last_journal_len = 0
         
     async def start_paper_trading(self):
         """Starts the tick player loop."""
@@ -178,6 +179,12 @@ class HistoricTickPlayer:
                         is_buyer_maker=is_buyer_maker,
                         timestamp_ns=tick_ns
                     )
+                    
+                    # Check if a new trade exits/fills completed and save report card in real-time!
+                    current_journal_len = len(self.state_machine.smart_router.trade_journal)
+                    if current_journal_len > self.last_journal_len and current_journal_len % 2 == 0:
+                        await self._save_session_report(line_count)
+                        self.last_journal_len = current_journal_len
                     
                     # 5. Live Status Output (Log progress every 10 seconds of real execution time to prevent flood)
                     current_time = time.time()
