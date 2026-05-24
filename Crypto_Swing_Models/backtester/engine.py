@@ -38,25 +38,28 @@ class GexBacktestEngine:
                  initial_cash: float = 10000.0,
                  maker_fee: float = 0.0002, # 0.02% maker fee
                  taker_fee: float = 0.0005, # 0.05% taker fee
-                 slippage_pct: float = 0.0003): # 0.03% expected slippage
+                 slippage_pct: float = 0.0003,
+                 grace_window_ticks: int = 3000,
+                 resample_ticks: int = 1500): 
                  
         self.initial_cash = initial_cash
         self.maker_fee = maker_fee
         self.taker_fee = taker_fee
         self.slippage = slippage_pct
+        self.grace_window = grace_window_ticks
+        self.resample_ticks = resample_ticks
         
-    def run_backtest(self, ticks: List[BacktestTick], key_strike: float, gex_value: float, deribit_index: float) -> Dict:
+    async def run_backtest(self, ticks: List[BacktestTick], key_strike: float, gex_value: float, deribit_index: float) -> Dict:
         """
         Executes backtest over the tick sequence with the designated GEX profile.
         """
         # Instantiate a State Machine in Shadow Mode to simulate executions
-        sm = GexMicroStateMachine(symbol="BTCUSDT", mode="SHADOW")
+        sm = GexMicroStateMachine(symbol="BTCUSDT", mode="SHADOW", grace_window_ticks=self.grace_window, resample_ticks=self.resample_ticks)
         
         # Set the options GEX wall boundary
         sm.update_gex_profile(key_strike=key_strike, gex_value=gex_value, deribit_index=deribit_index)
         
         cash = self.initial_cash
-        position = 0.0 # Number of contracts (long = positive, short = negative)
         equity = self.initial_cash
         peak_equity = self.initial_cash
         max_drawdown = 0.0
@@ -64,6 +67,8 @@ class GexBacktestEngine:
         total_trades = 0
         wins = 0
         total_fees = 0.0
+        
+        trade_returns = []
         
         # Override the state machine's smart router placing methods to direct PnL here
         # This lets us cleanly compute backtest metrics based on state transitions!
@@ -74,6 +79,8 @@ class GexBacktestEngine:
                 self.entry_price = 0.0
                 
         order_state = BacktestOrderState()
+        
+        processed_fills_count = 0
         
         for tick in ticks:
             # Track mid-price
@@ -94,60 +101,65 @@ class GexBacktestEngine:
             if drawdown > max_drawdown:
                 max_drawdown = drawdown
                 
-            # Check State Machine actions before updating state
-            # If State Machine entered position (State changed from 2 to 3)
-            prev_state = sm.state
-            
             # Feed tick into GexMicroStateMachine Master Loop
-            # Need to wrap inside async runner since it's an async function
-            import asyncio
-            asyncio.run(sm.process_market_tick(
+            await sm.process_market_tick(
                 mid_price=tick.price,
                 bid_qty=tick.bid_qty,
                 ask_qty=tick.ask_qty,
                 is_trade=tick.is_trade,
                 trade_price=tick.trade_price,
                 trade_qty=tick.trade_qty,
-                is_buyer_maker=tick.is_buyer_maker
-            ))
+                is_buyer_maker=tick.is_buyer_maker,
+                timestamp_ns=int(tick.timestamp * 1e9)
+            )
             
-            # Analyze state transition
-            if prev_state == 2 and sm.state == 3:
-                # Execution confirmation triggered maker order!
-                order_state.in_position = True
-                order_state.side = sm.position_side
-                # Maker entry fee and slippage
-                slippage_amt = mid_price * self.slippage
-                order_state.entry_price = mid_price + slippage_amt if order_state.side == "LONG" else mid_price - slippage_amt
+            # Poll SmartRouter trade journal for new fills (Immune to State Aliasing!)
+            journal = sm.smart_router.trade_journal
+            while processed_fills_count < len(journal):
+                fill = journal[processed_fills_count]
                 
-                fee = order_state.entry_price * self.maker_fee
-                cash -= fee
-                total_fees += fee
-                
-            elif prev_state == 3 and sm.state == 0:
-                # Invalidation exited position!
-                # Taker close exit price with slippage
-                slippage_amt = mid_price * self.slippage
-                exit_price = mid_price - slippage_amt if order_state.side == "LONG" else mid_price + slippage_amt
-                
-                # Calculate PnL
-                if order_state.side == "LONG":
-                    trade_pnl = (exit_price - order_state.entry_price)
-                else: # SHORT
-                    trade_pnl = (order_state.entry_price - exit_price)
-                    
-                fee = exit_price * self.taker_fee
-                cash += trade_pnl - fee
-                total_fees += fee
-                
-                total_trades += 1
-                if trade_pnl > 0:
-                    wins += 1
-                    
-                # Clear order state
-                order_state.in_position = False
-                order_state.side = None
-                order_state.entry_price = 0.0
+                if fill["status"] == "FILLED":
+                    if not order_state.in_position:
+                        # Entry Filled!
+                        order_state.in_position = True
+                        order_state.side = "LONG" if fill["side"] == "BUY" else "SHORT"
+                        order_state.entry_price = fill["price"]
+                        
+                        # Use exact fee charged by the router
+                        fee = fill["fee"]
+                        cash -= fee
+                        total_fees += fee
+                        
+                    else:
+                        # Exit Filled (Maker/Taker)!
+                        exit_price = fill["price"]
+                        
+                        if order_state.side == "LONG":
+                            trade_pnl = (exit_price - order_state.entry_price)
+                        else: # SHORT
+                            trade_pnl = (order_state.entry_price - exit_price)
+                            
+                        # Use exact fee charged by the router
+                        fee = fill["fee"]
+                        net_trade_pnl = trade_pnl - fee
+                        cash += trade_pnl - fee
+                        total_fees += fee
+                        
+                        total_trades += 1
+                        if trade_pnl > 0:
+                            wins += 1
+                            
+                        # Track return for Sharpe calculation
+                        trade_return = net_trade_pnl / order_state.entry_price
+                        trade_returns.append(trade_return)
+                        
+                        # Clear order state
+                        order_state.in_position = False
+                        order_state.side = None
+                        order_state.entry_price = 0.0
+                        
+                processed_fills_count += 1
+
                 
         final_balance = equity
         net_pnl = final_balance - self.initial_cash
@@ -155,8 +167,15 @@ class GexBacktestEngine:
         win_rate = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
         
         # Annualized Sharpe estimation based on trade returns distribution
-        sharpe = 3.24 if net_pnl > 0 else 0.0
-        
+        if len(trade_returns) > 1:
+            std_return = np.std(trade_returns)
+            mean_return = np.mean(trade_returns)
+            # Annualize assuming ~252 trading days and e.g. 5 trades per day average (1260 trades/year)
+            # This is a rough estimate, but much better than hardcoded 3.24
+            sharpe = (mean_return / std_return * np.sqrt(1260)) if std_return > 1e-8 else 0.0
+        else:
+            sharpe = 0.0
+            
         return {
             "final_balance": final_balance,
             "net_pnl": net_pnl,

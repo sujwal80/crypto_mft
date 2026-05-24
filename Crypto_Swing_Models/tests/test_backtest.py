@@ -7,12 +7,13 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../back
 from engine import GexBacktestEngine
 from run_gex_backtest import generate_backtest_data
 
-def test_gex_backtest_engine():
+@pytest.mark.asyncio
+async def test_gex_backtest_engine():
     """Verify GexBacktestEngine completes runs successfully and returns valid metrics."""
-    engine = GexBacktestEngine(initial_cash=10000.0)
+    engine = GexBacktestEngine(initial_cash=10000.0, grace_window_ticks=0, resample_ticks=1)
     ticks = generate_backtest_data()
     
-    results = engine.run_backtest(
+    results = await engine.run_backtest(
         ticks=ticks,
         key_strike=60000.0,
         gex_value=150.0,

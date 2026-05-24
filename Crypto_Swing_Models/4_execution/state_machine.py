@@ -3,6 +3,7 @@ import logging
 import time
 import sys
 import os
+from typing import Optional
 
 # Setup import paths
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -27,9 +28,11 @@ class GexMicroStateMachine:
       - STATE 2: Execution (Sniper Trigger on Confirmation Matrix)
       - STATE 3: Dynamic Invalidation (Aggressive Early Exit on structural breakdown)
     """
-    def __init__(self, symbol: str = "BTCUSDT", mode: str = "SHADOW"):
+    def __init__(self, symbol: str = "BTCUSDT", mode: str = "SHADOW", grace_window_ticks: int = 3000, resample_ticks: int = 1500):
         self.symbol = symbol
         self.mode = mode
+        self.grace_window = grace_window_ticks
+        self.resample_ticks = resample_ticks
         
         # Core state variable
         self.state = 0  # Starts in State 0: Hibernation
@@ -54,10 +57,13 @@ class GexMicroStateMachine:
         self.entry_order = None
         self.position_side = None # 'LONG' or 'SHORT'
         self.entry_price = 0.0
+        self.ticks_since_entry = 0
+        self.last_exit_eval_ns = None
         
     async def process_market_tick(self, mid_price: float, bid_qty: float, ask_qty: float, 
                                   is_trade: bool = False, trade_price: float = 0.0, 
-                                  trade_qty: float = 0.0, is_buyer_maker: bool = False):
+                                  trade_qty: float = 0.0, is_buyer_maker: bool = False,
+                                  timestamp_ns: Optional[int] = None):
         """
         Ingests high-frequency ticks and handles state transitions based on real-time micro-confirmations.
         """
@@ -67,6 +73,18 @@ class GexMicroStateMachine:
         
         # 1. Update perp price in basis tracker
         self.basis_tracker.update_perp_price(mid_price)
+        
+        # 1b. Process resting limit orders in the router queue (SHADOW mode high-fidelity)
+        if self.entry_order and self.entry_order.get("status") == "OPEN":
+            await self.smart_router.process_active_orders(self.symbol, mid_price)
+            if self.entry_order.get("status") == "FILLED":
+                self.in_position = True
+                self.entry_price = self.entry_order.get("price")
+                self.ticks_since_entry = 0  # Reset counter on fill
+                self.last_exit_eval_ns = timestamp_ns  # Initialize 1-minute bar anchor
+                self.state = 3  # Transition to Invalidation monitoring
+                logger.info(f"STATE_MACHINE: Resting limit entry filled at {self.entry_price:.2f}. Transition: STATE 2 -> STATE 3")
+
         
         # 2. Process Micro statistics if we are not throttled (State >= 1)
         l2_imbalance = (bid_qty - ask_qty) / (bid_qty + ask_qty + 1e-8)
@@ -95,7 +113,29 @@ class GexMicroStateMachine:
             await self._handle_state_2_execution(mid_price, z_score, filtered_price)
             
         elif self.state == 3:
-            await self._handle_state_3_invalidation(z_score, price_change)
+            self.ticks_since_entry += 1
+            
+            # 1-Minute Data Resampling Noise Filter:
+            should_evaluate = False
+            if self.resample_ticks == 1:
+                # Direct test bypass: evaluate exits on every tick
+                should_evaluate = True
+            elif timestamp_ns is not None:
+                if self.last_exit_eval_ns is None:
+                    self.last_exit_eval_ns = timestamp_ns
+                
+                elapsed_seconds = (timestamp_ns - self.last_exit_eval_ns) / 1e9
+                if elapsed_seconds >= 60.0:  # 1-minute close!
+                    should_evaluate = True
+            else:
+                # Fallback to tick count if time is blind: evaluate every resample_ticks ticks
+                if self.ticks_since_entry % self.resample_ticks == 0:
+                    should_evaluate = True
+                    
+            if should_evaluate:
+                await self._handle_state_3_invalidation(mid_price, z_score, price_change)
+                if timestamp_ns is not None:
+                    self.last_exit_eval_ns = timestamp_ns
 
     def update_gex_profile(self, key_strike: float, gex_value: float, deribit_index: float):
         """
@@ -159,63 +199,81 @@ class GexMicroStateMachine:
         STATE 2: Sniper Trigger.
         Requires L2 Z-score and CVD-Kalman absorption confirmation before submitting maker orders.
         """
-        # Check Confirmation Matrix for Reversals at positive Put Walls:
-        # 1. L2 bid imbalance Z-score must spike > +2.0 (Bids stacked up)
-        # 2. CVD engine reports passive absorption (sellers hitting bids but price refuses to budge)
+        # 1. If we have an active resting limit order, monitor it for drift/cancellation
+        if self.entry_order and self.entry_order.get("status") == "OPEN":
+            limit_price = self.entry_order.get("price")
+            
+            # Calculate absolute price drift percentage
+            distance_pct = (mid_price - limit_price) / limit_price if self.position_side == "LONG" else (limit_price - mid_price) / limit_price
+            
+            # If price drifts too far away without filling (> 0.2%), cancel order
+            if distance_pct > 0.0020:
+                logger.warning(f"STATE_MACHINE: Limit order drifted too far ({distance_pct*100:.3f}%). Cancelling order {self.entry_order['order_id']}.")
+                await self.smart_router.cancel_order(self.entry_order["order_id"])
+                self.entry_order = None
+                self.position_side = None
+                self.state = 1  # Revert to Armed to hunt again
+            return
+            
+        # 2. If no active order, evaluate entry confirmation matrix
         is_long_confirmed = (z_score >= 2.0) and self.cvd.detect_absorption_divergence(0.0)
-        
-        # For Short entries at Call Walls (imbalance Z-score < -2.0)
         is_short_confirmed = (z_score <= -2.0) and self.cvd.detect_absorption_divergence(0.0)
         
         if is_long_confirmed:
             logger.info(f"CONFIRMED: Long reversal triggered at {mid_price:.2f}. Submitting maker order.")
-            self.entry_order = await self.smart_router.place_post_only_limit(self.symbol, "BUY", mid_price - 0.5, 1.0)
-            self.in_position = True
             self.position_side = "LONG"
-            self.entry_price = mid_price
-            self.state = 3
+            self.entry_order = await self.smart_router.place_post_only_limit(self.symbol, "BUY", mid_price - 0.5, 1.0)
             
         elif is_short_confirmed:
             logger.info(f"CONFIRMED: Short reversal triggered at {mid_price:.2f}. Submitting maker order.")
-            self.entry_order = await self.smart_router.place_post_only_limit(self.symbol, "SELL", mid_price + 0.5, 1.0)
-            self.in_position = True
             self.position_side = "SHORT"
-            self.entry_price = mid_price
-            self.state = 3
+            self.entry_order = await self.smart_router.place_post_only_limit(self.symbol, "SELL", mid_price + 0.5, 1.0)
             
         else:
             # If confirmation fails, revert to Armed to prevent blind catches
             logger.debug("Matrix confirmation failed, remaining in STATE 2")
 
-    async def _handle_state_3_invalidation(self, z_score: float, price_change: float):
+    async def _handle_state_3_invalidation(self, mid_price: float, z_score: float, price_change: float):
         """
         STATE 3: Dynamic Invalidation & Exit.
-        Monitors the trade for structural breakdown (Z-score drops to -3.0, CVD panic sell).
-        Fires immediate market orders for early cuts, protecting capital.
+        Monitors the trade for structural breakdown (Z-score drops to -4.5, CVD panic sell).
+        Enforces a 1-minute resampled noise filter and minimum profit constraints.
         """
         if not self.in_position:
             self.state = 0
             return
             
-        # Check invalidation conditions:
-        # 1. L2 Bids vanish instantly (Z-score drops to -3.0)
-        # 2. Taker selling escalates (aggression ratio collapses)
+        # 1. Enforce Grace Window to allow structural GEX wall bounce to manifest
+        if self.ticks_since_entry < self.grace_window:
+            return
+            
+        # 2. Enforce a Minimum Take-Profit Gate ($150 move on BTC)
+        # If the trade is in profit, but the profit is less than $150, we ignore micro-noise and HOLD!
+        gross_pnl = (mid_price - self.entry_price) if self.position_side == "LONG" else (self.entry_price - mid_price)
+        if 0.0 < gross_pnl < 150.0:
+            logger.info(f"STATE_MACHINE: Exit blocked by Take-Profit Gate. Gross PnL too small (+${gross_pnl:.2f} < +$150.00). Holding.")
+            return
+            
+        # Check invalidation conditions (loosened to filter out standard noise):
+        # 1. L2 Bids vanish instantly (Z-score drops to -4.5 for LONG, +4.5 for SHORT)
+        # (Removed CVD aggression ratio exit to prevent micro-chopping)
         should_invalidate = False
         
         if self.position_side == "LONG":
-            if z_score <= -3.0 or self.cvd.get_aggression_ratio() < 0.2:
+            if z_score <= -4.5:
                 should_invalidate = True
         else: # SHORT
-            if z_score >= 3.0 or self.cvd.get_aggression_ratio() > 5.0:
+            if z_score >= 4.5:
                 should_invalidate = True
                 
         if should_invalidate:
             logger.warning(f"INVALIDATION TRIGGERED: Microstructure deteriorated (Z-score: {z_score:.2f}). CUTTING IMMEDIATELY.")
             exit_side = "SELL" if self.position_side == "LONG" else "BUY"
-            await self.smart_router.place_market_order(self.symbol, exit_side, 1.0)
+            await self.smart_router.place_market_order(self.symbol, exit_side, 1.0, shadow_price=mid_price)
             
             # Reset State variables
             self.in_position = False
             self.position_side = None
             self.entry_order = None
+            self.last_exit_eval_ns = None  # Reset bar anchor
             self.state = 0

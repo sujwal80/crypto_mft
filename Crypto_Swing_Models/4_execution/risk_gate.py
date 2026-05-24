@@ -47,7 +47,7 @@ class RiskGate:
             )
             return False
             
-        logger.info(
+        logger.debug(
             f"RiskGate Open: Expected move {expected_move_pct * 100:.3f}% "
             f"clears hurdle cost {self.required_edge * 100:.3f}%"
         )

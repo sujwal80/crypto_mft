@@ -10,7 +10,7 @@ from state_machine import GexMicroStateMachine
 @pytest.mark.asyncio
 async def test_state_machine_lifecycle():
     """Verify the complete 4-state lifecycle: Hibernation -> Armed -> Execution -> Invalidation."""
-    sm = GexMicroStateMachine(symbol="BTCUSDT", mode="SHADOW")
+    sm = GexMicroStateMachine(symbol="BTCUSDT", mode="SHADOW", grace_window_ticks=0, resample_ticks=1)
     
     # 1. Set macro wall targets
     # Strike at 60000, GEX is positive (Put Wall), Index is at 60000
@@ -56,11 +56,30 @@ async def test_state_machine_lifecycle():
         is_buyer_maker=True
     )
         
-    # The state machine should detect both bid imbalance spike and CVD absorption
-    # This triggers Maker entry order and transitions to State 3 (Invalidation monitoring)
+    # The state machine confirms triggers, submits limit order, but remains in STATE 2 (OPEN order)
+    assert sm.state == 2
+    assert sm.entry_order is not None
+    assert sm.entry_order["status"] == "OPEN"
+    assert sm.entry_order["price"] == 59999.5
+    assert sm.in_position == False
+    
+    # Feed a tick that crosses below the limit price (59999.5) to trigger the fill.
+    # Include some buyer trades to show support and keep the CVD aggression ratio healthy (> 0.2).
+    await sm.process_market_tick(
+        mid_price=59999.0, 
+        bid_qty=10.0, 
+        ask_qty=10.0,
+        is_trade=True,
+        trade_price=59999.0,
+        trade_qty=100.0,
+        is_buyer_maker=False  # Buyer taker (aggressive buying support)
+    )
+    
+    # Now the order should be filled, and we transition to State 3
     assert sm.state == 3
     assert sm.in_position == True
     assert sm.position_side == "LONG"
+    assert sm.entry_price == 59999.5
     
     # 6. Inject Invalidation trigger (Retail liquidations / bid vanish):
     # - Bids drop to zero, ask qty spikes to generate massive negative Z-score
@@ -70,3 +89,4 @@ async def test_state_machine_lifecycle():
     # Should trigger market order to cut the loss, reset position and return to Hibernation (0)
     assert sm.state == 0
     assert sm.in_position == False
+

@@ -16,7 +16,6 @@ from gex_mapper import GexMapper
 from smart_router import SmartRouter
 
 logger = logging.getLogger("SwingBacktester")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 
 class SwingBacktestEngine:
     """
@@ -28,19 +27,23 @@ class SwingBacktestEngine:
     def __init__(self, 
                  initial_cash: float = 10000.0,
                  maker_fee: float = 0.0010, # 0.1% Maker Fee as requested
-                 taker_fee: float = 0.0010): # 0.1% Taker Fee as requested
+                 taker_fee: float = 0.0010, # 0.1% Taker Fee as requested
+                 grace_window_ticks: int = 3000,
+                 resample_ticks: int = 1500): 
                  
         self.initial_cash = initial_cash
         self.maker_fee = maker_fee
         self.taker_fee = taker_fee
+        self.grace_window = grace_window_ticks
+        self.resample_ticks = resample_ticks
         
-    def stream_backtest(self, file_path: str) -> dict:
+    async def stream_backtest(self, file_path: str) -> dict:
         """
         Streams market data from the log file, processes ticks, and simulates trading.
         """
         # Instantiate mapping and state engines
         mapper = GexMapper(model_type="COIN_MARGINED")
-        sm = GexMicroStateMachine(symbol="BTCUSDT", mode="SHADOW")
+        sm = GexMicroStateMachine(symbol="BTCUSDT", mode="SHADOW", grace_window_ticks=self.grace_window, resample_ticks=self.resample_ticks)
         
         # Performance tracking states
         cash = self.initial_cash
@@ -55,6 +58,13 @@ class SwingBacktestEngine:
         total_trades = 0
         wins = 0
         total_fees = 0.0
+        
+        # Journal for LLM analysis
+        trade_journal = []
+        entry_time_ns = None
+        entry_fee_amt = 0.0
+        processed_fills_count = 0
+
         
         # L2 state reconstruction memory
         prev_bid_price = None
@@ -129,8 +139,8 @@ class SwingBacktestEngine:
                 # Keep strikes FIXED until a major drift occurs so price can actually approach the walls
                 deribit_idx = sm.basis_tracker.deribit_index_price
                 if (sm.adjusted_target_price is None or 
-                    deribit_idx is None or 
-                    abs(mid_price - deribit_idx) / deribit_idx > 0.015):
+                     deribit_idx is None or 
+                     abs(mid_price - deribit_idx) / deribit_idx > 0.015):
                     
                     # Generate options strikes centered on current mid price
                     strike_spacing = max(1.0, round(mid_price * 0.001, 1))
@@ -207,57 +217,81 @@ class SwingBacktestEngine:
                     hourly_start_equity = current_equity
                     
                 # 4. Execute State Machine Tick Processing
-                prev_state = sm.state
-                
-                # Run tick (using sync runner since process_market_tick is async)
-                import asyncio
-                asyncio.run(sm.process_market_tick(
+                await sm.process_market_tick(
                     mid_price=mid_price,
                     bid_qty=bid_qty,
                     ask_qty=ask_qty,
                     is_trade=is_inferred_trade,
                     trade_price=trade_price,
                     trade_qty=trade_qty,
-                    is_buyer_maker=is_buyer_maker
-                ))
+                    is_buyer_maker=is_buyer_maker,
+                    timestamp_ns=timestamp_ns
+                )
                 
-                # 5. Trade Execution and Fee Deductions
-                if prev_state == 2 and sm.state == 3:
-                    # Limit order filled (Maker entry)
-                    in_position = True
-                    position_side = sm.position_side
-                    entry_price = mid_price
+                # 5. Process Fills from the SmartRouter Journal (Immune to State Aliasing!)
+                journal = sm.smart_router.trade_journal
+                while processed_fills_count < len(journal):
+                    fill = journal[processed_fills_count]
                     
-                    fee = entry_price * self.maker_fee
-                    cash -= fee
-                    total_fees += fee
-                    logger.info(f"TRADE_ENTRY: Filled Maker {position_side} order @ {entry_price:.2f}. Fee paid: ${fee:.2f}")
-                    
-                elif prev_state == 3 and sm.state == 0:
-                    # Market order filled (Taker exit)
-                    in_position = False
-                    
-                    if position_side == "LONG":
-                        trade_pnl = mid_price - entry_price
-                    else: # SHORT
-                        trade_pnl = entry_price - mid_price
-                        
-                    fee = mid_price * self.taker_fee
-                    cash += trade_pnl - fee
-                    total_fees += fee
-                    
-                    total_trades += 1
-                    if trade_pnl > 0:
-                        wins += 1
-                        
-                    logger.info(
-                        f"TRADE_EXIT: Filled Taker exit @ {mid_price:.2f}. "
-                        f"PnL: {trade_pnl:+.2f} (net: {trade_pnl - fee:+.2f}). Fee paid: ${fee:.2f}"
-                    )
-                    
-                    # Reset states
-                    position_side = None
-                    entry_price = 0.0
+                    if fill["status"] == "FILLED":
+                        if not in_position:
+                            # Limit order filled (Maker entry)
+                            in_position = True
+                            position_side = "LONG" if fill["side"] == "BUY" else "SHORT"
+                            entry_price = fill["price"]
+                            entry_time_ns = fill["entry_time_ns"]
+                            entry_fee_amt = fill["fee"]
+                            
+                            cash -= entry_fee_amt
+                            total_fees += entry_fee_amt
+                            logger.warning(f"TRADE_ENTRY: Filled Maker {position_side} order @ {entry_price:.2f}. Fee paid: ${entry_fee_amt:.2f}")
+                            
+                        else:
+                            # Market/Limit exit order filled (Maker exit)
+                            in_position = False
+                            exit_price = fill["price"]
+                            exit_time_ns = fill["timestamp"]
+                            exit_fee_amt = fill["fee"]
+                            
+                            if position_side == "LONG":
+                                trade_pnl = exit_price - entry_price
+                            else: # SHORT
+                                trade_pnl = entry_price - exit_price
+                                
+                            cash += trade_pnl - exit_fee_amt
+                            total_fees += exit_fee_amt
+                            
+                            total_trades += 1
+                            if trade_pnl > 0:
+                                wins += 1
+                                
+                            logger.warning(
+                                f"TRADE_EXIT: Filled Maker Limit exit @ {exit_price:.2f}. "
+                                f"PnL: {trade_pnl:+.2f} (net: {fill['net_pnl']:+.2f}). Fee paid: ${exit_fee_amt:.2f}"
+                            )
+                            
+                            # Record trade to journal
+                            trade_journal.append({
+                                "trade_id": total_trades,
+                                "side": position_side,
+                                "entry_time_ns": entry_time_ns,
+                                "entry_price": entry_price,
+                                "entry_fee": entry_fee_amt,
+                                "exit_time_ns": exit_time_ns,
+                                "exit_price": exit_price,
+                                "exit_fee": exit_fee_amt,
+                                "gross_pnl": trade_pnl,
+                                "net_pnl": fill["net_pnl"],
+                                "duration_seconds": fill["duration_seconds"]
+                            })
+                            
+                            # Reset states
+                            position_side = None
+                            entry_price = 0.0
+                            entry_time_ns = None
+                            entry_fee_amt = 0.0
+                            
+                    processed_fills_count += 1
                     
                 # Track drawdowns
                 current_equity = cash
@@ -311,5 +345,6 @@ class SwingBacktestEngine:
             "total_trades": total_trades,
             "win_rate": win_rate,
             "total_fees_paid": total_fees,
-            "hourly_reports": hourly_reports
+            "hourly_reports": hourly_reports,
+            "trade_journal": trade_journal
         }

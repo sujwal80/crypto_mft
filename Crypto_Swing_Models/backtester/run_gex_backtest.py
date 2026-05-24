@@ -73,7 +73,7 @@ def generate_backtest_data() -> list:
         
     return ticks
 
-def main():
+async def main():
     print("=================================================================================")
     print("🚀 GEX-MICRO STATE MACHINE QUANT BACKTESTER - EVENT SIMULATION")
     print("=================================================================================")
@@ -92,7 +92,7 @@ def main():
     
     # 3. Run simulation on $60,000 Put Wall
     print("\nRunning historical event-driven backtest...")
-    results = engine.run_backtest(
+    results = await engine.run_backtest(
         ticks=ticks,
         key_strike=60000.0,
         gex_value=150.0,
@@ -114,4 +114,5 @@ def main():
     print("=================================================================================")
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())

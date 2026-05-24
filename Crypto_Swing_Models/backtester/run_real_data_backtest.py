@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import logging
 
 # Setup import paths
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -8,7 +9,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
 
 from swing_backtester import SwingBacktestEngine
 
-def main():
+async def main():
+    # Configure logging to suppress trace noise and only show prints
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
+    
     print("=================================================================================")
     print("🚀 GEX-MICRO STATE MACHINE - HISTORICAL REAL MARKET BACKTEST")
     print("=================================================================================")
@@ -26,7 +30,7 @@ def main():
     )
     
     start_time = time.time()
-    results = engine.stream_backtest(file_path)
+    results = await engine.stream_backtest(file_path)
     duration = time.time() - start_time
     
     print("\n=================================================================================")
@@ -41,6 +45,17 @@ def main():
     print(f"Total Exchange Fees    : ${results['total_fees_paid']:.2f}")
     print(f"Execution Duration     : {duration:.2f} seconds")
     print("=================================================================================")
+    
+    # Save report for LLM ingestion
+    report_path = "/Users/singhujwal/crypto_mft/real_backtest_report.json"
+    try:
+        import json
+        with open(report_path, "w") as f:
+            json.dump(results, f, indent=2)
+        print(f"\n📝 LLM-Ready Backtest Report saved to: {report_path}")
+    except Exception as e:
+        print(f"Error saving LLM report: {e}")
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())

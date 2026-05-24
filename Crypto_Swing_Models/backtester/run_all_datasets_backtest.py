@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import logging
+import json
 
 # Setup import paths
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -10,9 +11,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), ".")))
 from swing_backtester import SwingBacktestEngine
 
 logger = logging.getLogger("MasterBacktest")
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
+logging.basicConfig(level=logging.WARNING, format="%(asctime)s [%(levelname)s] %(message)s")
 
-def main():
+async def main():
     print("=================================================================================")
     print("🚀 ENTERPRISE GEX-MICRO STATE MACHINE BACKTEST SUITE - DEPLOYMENT STAGE")
     print("=================================================================================")
@@ -52,7 +53,7 @@ def main():
         print("=================================================================================")
         
         start_time = time.time()
-        results = engine.stream_backtest(file_path)
+        results = await engine.stream_backtest(file_path)
         duration = time.time() - start_time
         
         print(f"\nProcessing completed in {duration:.2f} seconds.")
@@ -84,6 +85,17 @@ def main():
     print(f"Aggregate Exchange Fees: ${total_fees:.2f}")
     print(f"Total Trades Across All: {total_trades}")
     print("=================================================================================")
+    
+    # Save rich performance history to JSON file for LLM parsing
+    report_path = "/Users/singhujwal/crypto_mft/backtest_report_summary.json"
+    try:
+        with open(report_path, "w") as f:
+            json.dump(all_results, f, indent=2)
+        print(f"\n📝 LLM-Ready Backtest Report saved successfully to: {report_path}")
+    except Exception as e:
+        logger.error(f"Failed to save LLM report: {e}")
+
 
 if __name__ == "__main__":
-    main()
+    import asyncio
+    asyncio.run(main())

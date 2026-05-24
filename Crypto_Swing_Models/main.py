@@ -3,6 +3,7 @@ import logging
 import sys
 import os
 import signal
+import numpy as np
 
 # Configure loggers for production standards
 logging.basicConfig(
