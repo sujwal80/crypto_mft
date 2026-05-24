@@ -61,6 +61,7 @@ class QuantSystemOrchestrator:
         self.state_machine = GexMicroStateMachine(symbol=self.symbol, mode=self.mode)
         
         self.tasks = []
+        self.ticks_processed = 0
 
     async def start(self):
         """Spawns all concurrent worker tasks."""
@@ -97,6 +98,9 @@ class QuantSystemOrchestrator:
         if self.tasks:
             await asyncio.gather(*self.tasks, return_exceptions=True)
             
+        # Compile and save the live shadow session report card
+        await self._save_session_report()
+            
         logger.info("System stopped. All capital risk gates locked.")
 
     async def _process_binance_depth_feed(self):
@@ -126,6 +130,7 @@ class QuantSystemOrchestrator:
                         ask_qty=best_ask_qty,
                         is_trade=False
                     )
+                    self.ticks_processed += 1
                     
                 self.binance_depth_queue.task_done()
             except asyncio.CancelledError:
@@ -155,6 +160,7 @@ class QuantSystemOrchestrator:
                     trade_qty=qty,
                     is_buyer_maker=is_buyer_maker
                 )
+                self.ticks_processed += 1
                 
                 self.binance_trade_queue.task_done()
             except asyncio.CancelledError:
@@ -255,6 +261,94 @@ class QuantSystemOrchestrator:
                 logger.error(f"Macro GEX mapping loop error: {e}")
                 
             await asyncio.sleep(10.0) # Run mapping calculation every 10 seconds
+
+    async def _save_session_report(self):
+        """Compiles rich performance history to a JSON file for live session evaluations."""
+        journal = self.state_machine.smart_router.trade_journal
+        if not journal:
+            logger.warning("📝 No trades were executed during this session. No report saved.")
+            return
+            
+        logger.warning("\n================================================================================")
+        logger.warning("📊 COMPILING LIVE SHADOW SESSION REPORT CARD...")
+        logger.warning("================================================================================")
+        
+        initial_capital = 10000.0
+        cash = initial_capital
+        wins = 0
+        total_fees = 0.0
+        total_trades = 0
+        trade_records = []
+        
+        active_pos = None
+        
+        for fill in journal:
+            total_fees += fill["fee"]
+            
+            # If we are not in an active position, this fill must be the entry fill
+            if not active_pos:
+                active_pos = {
+                    "side": "LONG" if fill["side"] == "BUY" else "SHORT",
+                    "entry_price": fill["price"],
+                    "entry_fee": fill["fee"],
+                    "entry_time_ns": fill["timestamp"] * 1e9
+                }
+            # If we are already in an active position, this fill must be the exit fill
+            else:
+                exit_price = fill["price"]
+                entry_price = active_pos["entry_price"]
+                
+                if active_pos["side"] == "LONG":
+                    trade_pnl = exit_price - entry_price
+                else:
+                    trade_pnl = entry_price - exit_price
+                    
+                net_pnl = trade_pnl - (active_pos["entry_fee"] + fill["fee"])
+                cash += net_pnl
+                
+                total_trades += 1
+                if net_pnl > 0:
+                    wins += 1
+                    
+                trade_records.append({
+                    "trade_id": total_trades,
+                    "side": active_pos["side"],
+                    "entry_price": entry_price,
+                    "entry_fee": active_pos["entry_fee"],
+                    "exit_price": exit_price,
+                    "exit_fee": fill["fee"],
+                    "gross_pnl": trade_pnl,
+                    "net_pnl": net_pnl,
+                    "duration_seconds": fill["timestamp"] - (active_pos["entry_time_ns"] / 1e9)
+                })
+                active_pos = None
+                
+        net_return_pct = ((cash - initial_capital) / initial_capital) * 100.0
+        win_rate = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
+        
+        report = {
+            "session_metrics": {
+                "initial_capital": initial_capital,
+                "final_balance": cash,
+                "net_pnl": cash - initial_capital,
+                "net_percentage_return": net_return_pct,
+                "total_trades": total_trades,
+                "win_rate": win_rate,
+                "total_fees_paid": total_fees,
+                "ticks_processed": self.ticks_processed
+            },
+            "trade_journal": trade_records
+        }
+        
+        report_path = "/Users/singhujwal/crypto_mft/live_paper_trading_report.json"
+        try:
+            import json
+            with open(report_path, "w") as f:
+                json.dump(report, f, indent=2)
+            logger.warning(f"📝 LLM-Ready Live Session Report saved successfully to: {report_path}")
+            logger.warning("================================================================================")
+        except Exception as e:
+            logger.error(f"Failed to save live session report: {e}")
 
 async def main():
     orchestrator = QuantSystemOrchestrator(symbol="BTCUSDT", mode="SHADOW")
