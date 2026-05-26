@@ -2,6 +2,11 @@ import os
 import sys
 import time
 import numpy as np
+import logging
+
+# Setup production logging to stdout for the test run
+logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
 
 # Setup import paths
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -20,9 +25,9 @@ def generate_backtest_data() -> list:
     ticks = []
     timestamp = time.time()
     
-    # 1. Phase 1: Wandering down (Ticks 0 to 100)
-    for i in range(100):
-        price = 61000.0 - (i * 8.0) # Smooth decay towards 60,200
+    # 1. Phase 1: Wandering down (Ticks 0 to 1000)
+    for i in range(1000):
+        price = 61000.0 - (i * 0.8) # Slow, smooth decay towards 60,200
         ticks.append(BacktestTick(
             timestamp=timestamp + i * 0.1,
             price=price,
@@ -30,11 +35,11 @@ def generate_backtest_data() -> list:
             ask_qty=10.0
         ))
         
-    # 2. Phase 2: Proximity & Target Hit at 60,000 (Ticks 100 to 200)
+    # 2. Phase 2: Proximity & Target Hit at 60,000 (Ticks 1000 to 1100)
     # We prime the CVD engine with heavy taker selling first
     for i in range(100):
         ticks.append(BacktestTick(
-            timestamp=timestamp + (100 + i) * 0.1,
+            timestamp=timestamp + (1000 + i) * 0.1,
             price=60000.0,
             bid_qty=10.0,
             ask_qty=10.0,
@@ -46,7 +51,7 @@ def generate_backtest_data() -> list:
         
     # 3. Sniper Confirm Trigger: Spike Bid volume to stack bids (Z-score > 2.0)
     ticks.append(BacktestTick(
-        timestamp=timestamp + 200 * 0.1,
+        timestamp=timestamp + 1100 * 0.1,
         price=60000.0,
         bid_qty=800.0,
         ask_qty=10.0,
@@ -56,18 +61,35 @@ def generate_backtest_data() -> list:
         is_buyer_maker=True
     ))
     
-    # 4. Phase 3: Sudden Market Breakdown (Ticks 201 to 250)
-    # Bids vanish, CVD selling continues, spot falls
+    # 4. Phase 3: Sudden Market Breakdown (Ticks 1101 to 1150)
     for i in range(50):
         price = 60000.0 - (i * 10.0)
         ticks.append(BacktestTick(
-            timestamp=timestamp + (201 + i) * 0.1,
+            timestamp=timestamp + (1101 + i) * 0.1,
             price=price,
             bid_qty=1.0,
             ask_qty=1000.0, # Massive Ask volume representing sell panic
             is_trade=True,
             trade_price=price,
             trade_qty=50.0,
+            is_buyer_maker=True
+        ))
+        
+    # 5. Phase 4: Limit Fill & Post-Entry Invalidation Cut (Ticks 1151 to 1250)
+    for i in range(100):
+        if i < 10:
+            price = 59500.0 + (i * 6.0) # Rises from 59500 to 59560 to fill Short limit order at 59520.50
+        else:
+            price = 59560.0 - ((i - 10) * 20.0) # Plunges to test exits
+            
+        ticks.append(BacktestTick(
+            timestamp=timestamp + (1151 + i) * 0.1,
+            price=price,
+            bid_qty=1.0,
+            ask_qty=1000.0,
+            is_trade=True,
+            trade_price=price,
+            trade_qty=25.0,
             is_buyer_maker=True
         ))
         
@@ -87,7 +109,9 @@ async def main():
         initial_cash=10000.0,
         maker_fee=0.001,
         taker_fee=0.001,
-        slippage_pct=0.0003
+        slippage_pct=0.0003,
+        grace_window_ticks=100,
+        resample_ticks=50
     )
     
     # 3. Run simulation on $60,000 Put Wall

@@ -53,8 +53,8 @@ class GexBacktestEngine:
         """
         Executes backtest over the tick sequence with the designated GEX profile.
         """
-        # Instantiate a State Machine in Shadow Mode to simulate executions
-        sm = GexMicroStateMachine(symbol="BTCUSDT", mode="SHADOW", grace_window_ticks=self.grace_window, resample_ticks=self.resample_ticks)
+        # Instantiate a State Machine in Shadow Mode to simulate executions (Forcing prioritize_time=False for tick-based tests)
+        sm = GexMicroStateMachine(symbol="BTCUSDT", mode="SHADOW", grace_window_ticks=self.grace_window, resample_ticks=self.resample_ticks, prioritize_time=False)
         
         # Set the options GEX wall boundary
         sm.update_gex_profile(key_strike=key_strike, gex_value=gex_value, deribit_index=deribit_index)

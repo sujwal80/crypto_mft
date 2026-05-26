@@ -13,6 +13,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../3_al
 from welford_stats import WelfordRollingStats
 from kalman_filter import MicroPriceKalmanFilter
 from cvd_engine import CumulativeVolumeDeltaEngine
+from bar_resampler import BarResampler
 from risk_gate import RiskGate
 from basis_tracker import BasisTracker
 from smart_router import SmartRouter
@@ -28,11 +29,12 @@ class GexMicroStateMachine:
       - STATE 2: Execution (Sniper Trigger on Confirmation Matrix)
       - STATE 3: Dynamic Invalidation (Aggressive Early Exit on structural breakdown)
     """
-    def __init__(self, symbol: str = "BTCUSDT", mode: str = "SHADOW", grace_window_ticks: int = 3000, resample_ticks: int = 1500):
+    def __init__(self, symbol: str = "BTCUSDT", mode: str = "SHADOW", grace_window_ticks: int = 3000, resample_ticks: int = 1500, prioritize_time: bool = True):
         self.symbol = symbol
         self.mode = mode
         self.grace_window = grace_window_ticks
         self.resample_ticks = resample_ticks
+        self.prioritize_time = prioritize_time
         
         # Core state variable
         self.state = 0  # Starts in State 0: Hibernation
@@ -46,6 +48,7 @@ class GexMicroStateMachine:
         self.welford = WelfordRollingStats(window_size=1000)
         self.kalman = MicroPriceKalmanFilter(process_noise=1e-5, measurement_noise=1e-2)
         self.cvd = CumulativeVolumeDeltaEngine(rolling_window_ticks=5000)
+        self.resampler = BarResampler(bar_duration_seconds=60, bar_duration_ticks=self.resample_ticks if self.resample_ticks > 1 else None, prioritize_time=self.prioritize_time)
         
         # Macro GEX Wall target state variables
         self.active_gex_strike = None
@@ -65,77 +68,97 @@ class GexMicroStateMachine:
                                   trade_qty: float = 0.0, is_buyer_maker: bool = False,
                                   timestamp_ns: Optional[int] = None):
         """
-        Ingests high-frequency ticks and handles state transitions based on real-time micro-confirmations.
+        Ingests high-frequency ticks, resamples them, and handles state transitions.
         """
         mid_price = float(mid_price)
         bid_qty = float(bid_qty)
         ask_qty = float(ask_qty)
         
-        # 1. Update perp price in basis tracker
+        # 1. Update perp price in basis tracker (always tick-by-tick)
         self.basis_tracker.update_perp_price(mid_price)
         
-        # 1b. Process resting limit orders in the router queue (SHADOW mode high-fidelity)
+        # 1b. Process resting limit orders in the router queue (always tick-by-tick for execution fidelity)
         if self.entry_order and self.entry_order.get("status") == "OPEN":
             await self.smart_router.process_active_orders(self.symbol, mid_price)
             if self.entry_order.get("status") == "FILLED":
                 self.in_position = True
                 self.entry_price = self.entry_order.get("price")
                 self.ticks_since_entry = 0  # Reset counter on fill
-                self.last_exit_eval_ns = timestamp_ns  # Initialize 1-minute bar anchor
+                self.last_exit_eval_ns = timestamp_ns
                 self.state = 3  # Transition to Invalidation monitoring
                 logger.info(f"STATE_MACHINE: Resting limit entry filled at {self.entry_price:.2f}. Transition: STATE 2 -> STATE 3")
 
+        # 2. Feed to Bar Resampler
+        if self.resample_ticks == 1:
+            # Direct tick-by-tick evaluation bypass (for fast unit tests)
+            bar = {
+                "close": mid_price,
+                "bid_qty": bid_qty,
+                "ask_qty": ask_qty,
+                "volume": trade_qty if is_trade else 0.0,
+                "cvd": (-trade_qty if is_buyer_maker else trade_qty) if is_trade else 0.0
+            }
+        else:
+            bar = self.resampler.process_tick(
+                price=mid_price,
+                bid_qty=bid_qty,
+                ask_qty=ask_qty,
+                is_trade=is_trade,
+                trade_price=trade_price,
+                trade_qty=trade_qty,
+                is_buyer_maker=is_buyer_maker,
+                timestamp_ns=timestamp_ns
+            )
+            
+        # 3. If no bar completed, stop here (skip high-frequency noise evaluation)
+        if bar is None:
+            return
+            
+        # 4. We have a completed 1-minute bar close! Execute analytical evaluations:
+        bar_price = bar["close"]
+        bar_bid_qty = bar["bid_qty"]
+        bar_ask_qty = bar["ask_qty"]
         
-        # 2. Process Micro statistics if we are not throttled (State >= 1)
-        l2_imbalance = (bid_qty - ask_qty) / (bid_qty + ask_qty + 1e-8)
-        
-        # Compute rolling statistics via O(1) Welford
+        # 4a. Compute L2 Imbalance using resampled bar quantities
+        l2_imbalance = (bar_bid_qty - bar_ask_qty) / (bar_bid_qty + bar_ask_qty + 1e-8)
         mean_imbalance, std_imbalance, z_score = self.welford.update(l2_imbalance)
         
-        # Compute Kalman-filtered micro-price
-        filtered_price = self.kalman.filter_tick(mid_price)
+        # 4b. Compute Kalman-filtered price
+        filtered_price = self.kalman.filter_tick(bar_price)
         
-        # Process CVD on live trades
-        if is_trade:
-            self.cvd.process_trade(trade_price, trade_qty, is_buyer_maker)
-            
-        # Calculate price movement for absorption detection
-        price_change = (filtered_price - mid_price) / mid_price
+        # 4c. Process aggregated trade delta in CVD engine
+        if abs(bar["cvd"]) > 0.0:
+            is_seller_taker = bar["cvd"] < 0.0
+            self.cvd.process_trade(
+                trade_price=bar_price,
+                amount=abs(bar["cvd"]),
+                is_buyer_maker=is_seller_taker
+            )
         
-        # State Machine Transitions
+        # Calculate close-to-close price change
+        price_change = (filtered_price - bar_price) / bar_price
+        
+        # 5. Evaluate State Transitions at bar close
         if self.state == 0:
-            await self._handle_state_0_recon(mid_price)
+            await self._handle_state_0_recon(bar_price)
             
         elif self.state == 1:
-            await self._handle_state_1_armed(mid_price, z_score, filtered_price, price_change)
+            await self._handle_state_1_armed(bar_price, z_score, filtered_price, price_change)
             
         elif self.state == 2:
-            await self._handle_state_2_execution(mid_price, z_score, filtered_price)
+            await self._handle_state_2_execution(bar_price, z_score, filtered_price)
             
         elif self.state == 3:
+            # Enforce Time-Locked Grace Window
             self.ticks_since_entry += 1
             
-            # 1-Minute Data Resampling Noise Filter:
-            should_evaluate = False
-            if self.resample_ticks == 1:
-                # Direct test bypass: evaluate exits on every tick
-                should_evaluate = True
-            elif timestamp_ns is not None:
-                if self.last_exit_eval_ns is None:
-                    self.last_exit_eval_ns = timestamp_ns
+            # Lockout exits for the first 5 resampled bars post-entry (5 minutes breathing room)
+            grace_period_bars = 5
+            if self.resample_ticks > 1 and self.ticks_since_entry < grace_period_bars:
+                logger.debug(f"STATE_MACHINE: Invalidation evaluation locked. Bar {self.ticks_since_entry}/{grace_period_bars} post-entry.")
+                return
                 
-                elapsed_seconds = (timestamp_ns - self.last_exit_eval_ns) / 1e9
-                if elapsed_seconds >= 60.0:  # 1-minute close!
-                    should_evaluate = True
-            else:
-                # Fallback to tick count if time is blind: evaluate every resample_ticks ticks
-                if self.ticks_since_entry % self.resample_ticks == 0:
-                    should_evaluate = True
-                    
-            if should_evaluate:
-                await self._handle_state_3_invalidation(mid_price, z_score, price_change)
-                if timestamp_ns is not None:
-                    self.last_exit_eval_ns = timestamp_ns
+            await self._handle_state_3_invalidation(bar_price, z_score, price_change)
 
     def update_gex_profile(self, key_strike: float, gex_value: float, deribit_index: float):
         """
