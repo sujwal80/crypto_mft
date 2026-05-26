@@ -70,6 +70,7 @@ class HistoricTickPlayer:
         prev_ask_qty = 0.0
         
         line_count = 0
+        mid_price = 0.0
         
         try:
             with open(self.file_path, "r") as f:
@@ -203,6 +204,18 @@ class HistoricTickPlayer:
         except KeyboardInterrupt:
             logger.warning("\n⚠️ Shadow paper trading session was manually interrupted (Ctrl+C).")
         finally:
+            # If we are still in an open swing position at the end of the dataset, force closeout to capture PnL!
+            if self.state_machine.in_position and mid_price > 0.0:
+                logger.warning("⏰ Final Session Closeout: Forcing market close of open swing position at last spot price...")
+                exit_side = "SELL" if self.state_machine.position_side == "LONG" else "BUY"
+                await self.state_machine.smart_router.place_market_order(
+                    symbol=self.symbol,
+                    side=exit_side,
+                    amount=1.0,
+                    shadow_price=mid_price
+                )
+                self.state_machine.in_position = False
+            
             # Compile and save the rich LLM evaluation report before exiting!
             await self._save_session_report(line_count)
 
