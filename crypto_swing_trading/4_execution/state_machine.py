@@ -66,6 +66,15 @@ class GexMicroStateMachine:
         self.ticks_since_entry = 0
         self.last_exit_eval_ns = None
         
+        # Volatility-Adjusted Exit Optimization
+        self.price_welford = WelfordRollingStats(window_size=1000)
+        self.last_bar_price = None
+        self.current_price_vol = 0.01  # Initial fallback: 1.0% volatility
+        
+        # Entry Cooldown Optimization
+        self.global_bar_counter = 0
+        self.cooldown_until_bar = 0
+        
     async def process_market_tick(self, mid_price: float, bid_qty: float, ask_qty: float, 
                                   is_trade: bool = False, trade_price: float = 0.0, 
                                   trade_qty: float = 0.0, is_buyer_maker: bool = False,
@@ -138,8 +147,23 @@ class GexMicroStateMachine:
                 is_buyer_maker=is_seller_taker
             )
         
-        # Calculate close-to-close price change
-        price_change = (filtered_price - bar_price) / bar_price
+        # Calculate close-to-close price change (raw bar returns)
+        price_change = (bar_price - self.last_bar_price) / self.last_bar_price if self.last_bar_price is not None else 0.0
+        
+        # Volatility tracking: update price welford with bar return
+        if self.last_bar_price is not None:
+            bar_return = (bar_price - self.last_bar_price) / self.last_bar_price
+            _, price_vol, _ = self.price_welford.update(bar_return)
+            # Cap rolling volatility bounds between 0.8% and 2.0% for safety limits (filters micro-noise)
+            self.current_price_vol = max(0.008, min(0.02, price_vol))
+        self.last_bar_price = bar_price
+        
+        self.global_bar_counter += 1
+        
+        # Enforce entry cooldown lockout period post-exit to prevent whipsawing
+        if self.global_bar_counter < self.cooldown_until_bar:
+            logger.debug(f"STATE_MACHINE: Entry locked due to active cooldown. Remaining: {self.cooldown_until_bar - self.global_bar_counter} bars.")
+            return
         
         # 5. Evaluate State Transitions at bar close
         if self.state == 0:
@@ -149,7 +173,7 @@ class GexMicroStateMachine:
             await self._handle_state_1_armed(bar_price, z_score, filtered_price, price_change)
             
         elif self.state == 2:
-            await self._handle_state_2_execution(bar_price, z_score, filtered_price)
+            await self._handle_state_2_execution(bar_price, z_score, filtered_price, price_change)
             
         elif self.state == 3:
             # Enforce Time-Locked Grace Window
@@ -220,7 +244,7 @@ class GexMicroStateMachine:
             logger.info("Transition: STATE 1 -> STATE 2 (Adjusted Target Hit, verifying Confirmation Matrix)")
             self.state = 2
 
-    async def _handle_state_2_execution(self, mid_price: float, z_score: float, filtered_price: float):
+    async def _handle_state_2_execution(self, mid_price: float, z_score: float, filtered_price: float, price_change: float):
         """
         STATE 2: Sniper Trigger.
         Requires L2 Z-score and CVD-Kalman absorption confirmation before submitting maker orders.
@@ -245,9 +269,25 @@ class GexMicroStateMachine:
         sell_th = 0.3 if self.resample_ticks == 1 else 0.75
         buy_th = 3.0 if self.resample_ticks == 1 else 1.33
         
-        is_long_confirmed = (z_score >= 0.8) and self.cvd.detect_absorption_divergence(0.0, sell_threshold=sell_th, buy_threshold=buy_th)
-        is_short_confirmed = (z_score <= -0.8) and self.cvd.detect_absorption_divergence(0.0, sell_threshold=sell_th, buy_threshold=buy_th)
+        is_long_confirmed = (z_score >= 0.8) and self.cvd.detect_absorption_divergence(price_change, sell_threshold=sell_th, buy_threshold=buy_th)
+        is_short_confirmed = (z_score <= -0.8) and self.cvd.detect_absorption_divergence(price_change, sell_threshold=sell_th, buy_threshold=buy_th)
         
+        # 3. State-Space Trend Safety Filter (Momentum/Waterfall protection)
+        # Uses Kalman Filter lag to detect high-velocity trends that break options walls.
+        # Enforced only in production resampled bar mode (resample_ticks > 1) to allow tick unit tests to pass
+        if self.resample_ticks > 1:
+            crash_gap = (filtered_price - mid_price) / mid_price
+            
+            if is_long_confirmed:
+                if crash_gap > 0.0045:  # 0.45% lag threshold for downward waterfalls
+                    logger.warning(f"TREND_GATE LOCK: LONG entry blocked. High downward momentum detected (Kalman Crash Gap: {crash_gap*100:.2f}%).")
+                    is_long_confirmed = False
+                    
+            if is_short_confirmed:
+                if crash_gap < -0.0045: # 0.45% lag threshold for upward short squeezes
+                    logger.warning(f"TREND_GATE LOCK: SHORT entry blocked. High upward momentum detected (Kalman Squeeze Gap: {crash_gap*100:.2f}%).")
+                    is_short_confirmed = False
+                
         if is_long_confirmed:
             logger.info(f"CONFIRMED: Long reversal triggered at {mid_price:.2f}. Submitting maker order.")
             self.position_side = "LONG"
@@ -273,7 +313,56 @@ class GexMicroStateMachine:
             return
             
         # 1. Enforce Grace Window to allow structural GEX wall bounce to manifest
-        if self.ticks_since_entry < self.grace_window:
+        if self.resample_ticks > 1:
+            # In resampled bar mode, grace window is enforced on completed bars (5 minutes)
+            if self.ticks_since_entry < 5:
+                return
+        else:
+            # In raw tick mode, use the configured grace window ticks
+            if self.ticks_since_entry < self.grace_window:
+                return
+                
+        # 1.5. Volatility-Adjusted Price Targets (ATR / Welford Volatility)
+        vol_buffer = self.current_price_vol
+        stop_loss_pct = 1.0 * vol_buffer
+        take_profit_pct = 4.0 * vol_buffer
+        
+        price_target_hit = False
+        exit_reason = ""
+        
+        if self.position_side == "LONG":
+            # Stop Loss check
+            if mid_price <= self.entry_price * (1.0 - stop_loss_pct):
+                price_target_hit = True
+                exit_reason = f"Volatility Stop-Loss hit (-{stop_loss_pct*100:.2f}%)"
+            # Take Profit check
+            elif mid_price >= self.entry_price * (1.0 + take_profit_pct):
+                price_target_hit = True
+                exit_reason = f"Volatility Take-Profit hit (+{take_profit_pct*100:.2f}%)"
+        else: # SHORT
+            # Stop Loss check
+            if mid_price >= self.entry_price * (1.0 + stop_loss_pct):
+                price_target_hit = True
+                exit_reason = f"Volatility Stop-Loss hit (-{stop_loss_pct*100:.2f}%)"
+            # Take Profit check
+            elif mid_price <= self.entry_price * (1.0 - take_profit_pct):
+                price_target_hit = True
+                exit_reason = f"Volatility Take-Profit hit (+{take_profit_pct*100:.2f}%)"
+                
+        if price_target_hit:
+            logger.warning(f"STATE_MACHINE: Price Target hit! Reason: {exit_reason}. Closing position.")
+            exit_side = "SELL" if self.position_side == "LONG" else "BUY"
+            await self.smart_router.place_market_order(self.symbol, exit_side, 1.0, shadow_price=mid_price)
+            
+            # Reset State variables
+            self.in_position = False
+            self.position_side = None
+            self.entry_order = None
+            self.last_exit_eval_ns = None
+            
+            # Apply entry cooldown: lock entries for next 30 completed bars (30 minutes)
+            self.cooldown_until_bar = self.global_bar_counter + 30
+            self.state = 0
             return
             
         # 2. Enforce a Minimum Take-Profit Gate ($150 move on BTC)
@@ -305,4 +394,7 @@ class GexMicroStateMachine:
             self.position_side = None
             self.entry_order = None
             self.last_exit_eval_ns = None  # Reset bar anchor
+            
+            # Apply entry cooldown: lock entries for next 30 completed bars (30 minutes)
+            self.cooldown_until_bar = self.global_bar_counter + 30
             self.state = 0

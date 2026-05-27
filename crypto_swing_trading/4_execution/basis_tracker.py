@@ -1,4 +1,5 @@
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -11,19 +12,30 @@ class BasisTracker:
     def __init__(self):
         self.binance_perp_price = None
         self.deribit_index_price = None
+        self.last_perp_update = 0.0
+        self.last_index_update = 0.0
         self.basis = 0.0 # Binance_Perp - Deribit_Index
 
     def update_perp_price(self, price: float):
         self.binance_perp_price = float(price)
+        self.last_perp_update = time.time()
         self._recalculate_basis()
 
     def update_index_price(self, price: float):
         self.deribit_index_price = float(price)
+        self.last_index_update = time.time()
         self._recalculate_basis()
 
     def _recalculate_basis(self):
-        if self.binance_perp_price is not None and self.deribit_index_price is not None:
+        now = time.time()
+        # Enforce a strict 15-second freshness on both feeds to prevent stale/frozen prices from skewing the basis
+        if (self.binance_perp_price is not None and 
+            self.deribit_index_price is not None and 
+            (now - self.last_perp_update) < 15.0 and 
+            (now - self.last_index_update) < 15.0):
             self.basis = self.binance_perp_price - self.deribit_index_price
+        else:
+            self.basis = 0.0
 
     def adjust_strike_to_execution_target(self, deribit_strike: float) -> float:
         """

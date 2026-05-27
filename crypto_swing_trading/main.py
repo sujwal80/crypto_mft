@@ -3,6 +3,8 @@ import logging
 import sys
 import os
 import signal
+import time
+import datetime
 import numpy as np
 from dotenv import load_dotenv
 
@@ -133,7 +135,8 @@ class QuantSystemOrchestrator:
                         mid_price=mid_price,
                         bid_qty=best_bid_qty,
                         ask_qty=best_ask_qty,
-                        is_trade=False
+                        is_trade=False,
+                        timestamp_ns=int(time.time() * 1e9)
                     )
                     self.ticks_processed += 1
                     
@@ -169,7 +172,8 @@ class QuantSystemOrchestrator:
                     is_trade=True,
                     trade_price=price,
                     trade_qty=qty,
-                    is_buyer_maker=is_buyer_maker
+                    is_buyer_maker=is_buyer_maker,
+                    timestamp_ns=int(time.time() * 1e9)
                 )
                 self.ticks_processed += 1
                 
@@ -225,6 +229,28 @@ class QuantSystemOrchestrator:
                     # Clean sigmas: fallback to 40% if 0.0
                     sigmas = np.where(sigmas <= 0.01, 0.40, sigmas)
                     
+                    # Calculate dynamic time to expiry for next Friday 08:00 UTC (Deribit Weekly Cycle)
+                    now_utc = datetime.datetime.now(datetime.timezone.utc)
+                    days_ahead = 4 - now_utc.weekday()
+                    if days_ahead < 0:
+                        days_ahead += 7
+                    elif days_ahead == 0 and now_utc.hour >= 8:
+                        days_ahead = 7
+                    
+                    next_friday = now_utc + datetime.timedelta(days=days_ahead)
+                    expiry_datetime = datetime.datetime(
+                        year=next_friday.year,
+                        month=next_friday.month,
+                        day=next_friday.day,
+                        hour=8,
+                        minute=0,
+                        second=0,
+                        tzinfo=datetime.timezone.utc
+                    )
+                    
+                    seconds_to_expiry = (expiry_datetime - now_utc).total_seconds()
+                    t_dynamic = max(1e-5, seconds_to_expiry / (365.0 * 24.0 * 3600.0))
+                    
                     # Calculate dealer GEX profile
                     gex_profile = self.mapper.calculate_gex_profile(
                         spot_price=index_price,
@@ -232,7 +258,7 @@ class QuantSystemOrchestrator:
                         call_oi=call_oi,
                         put_oi=put_oi,
                         sigmas=sigmas,
-                        t=7.0/365.0, # Assumed rolling 7-day expiry
+                        t=t_dynamic,
                         r=0.05,
                         q=0.00
                     )
@@ -357,12 +383,12 @@ class QuantSystemOrchestrator:
             "trade_journal": trade_records
         }
         
-        report_path = "/Users/singhujwal/crypto_mft/live_paper_trading_report.json"
+        report_path = os.getenv("REPORT_PATH", "live_paper_trading_report.json")
         try:
             import json
             with open(report_path, "w") as f:
                 json.dump(report, f, indent=2)
-            logger.warning(f"📝 LLM-Ready Live Session Report saved successfully to: {report_path}")
+            logger.warning(f"📝 Live Session Report saved successfully to: {report_path}")
             logger.warning("================================================================================")
         except Exception as e:
             logger.error(f"Failed to save live session report: {e}")

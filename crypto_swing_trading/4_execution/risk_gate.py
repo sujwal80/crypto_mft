@@ -36,8 +36,6 @@ class RiskGate:
         Returns:
             bool: True if the trade satisfies the strict 0.2% fee-to-profit gate constraint.
         """
-        distance_to_wall = abs(current_price - gex_strike) / current_price
-        
         # The absolute trade target must justify the friction.
         # Expected profit (expected_move_pct) must overpower total transaction costs.
         if expected_move_pct < self.required_edge:

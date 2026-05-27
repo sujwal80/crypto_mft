@@ -140,7 +140,7 @@ class SwingBacktestEngine:
                 deribit_idx = sm.basis_tracker.deribit_index_price
                 if (sm.adjusted_target_price is None or 
                      deribit_idx is None or 
-                     abs(mid_price - deribit_idx) / deribit_idx > 0.015):
+                     abs(mid_price - deribit_idx) / deribit_idx > 0.05):
                     
                     # Generate options strikes centered on current mid price
                     strike_spacing = max(1.0, round(mid_price * 0.001, 1))
@@ -150,14 +150,15 @@ class SwingBacktestEngine:
                     call_oi = np.full_like(strikes, 10000.0)
                     put_oi = np.full_like(strikes, 10000.0)
                     
-                    # Put Wall at -0.4% index, Call Wall at +0.4% index
-                    call_oi[14] = 150000.0  # Call Wall at strike +4 steps
-                    put_oi[6] = 150000.0    # Put Wall at strike -4 steps
+                    # Put Wall at -0.8% index, Call Wall at +0.8% index
+                    call_oi[18] = 150000.0  # Call Wall at strike +8 steps (0.8%)
+                    put_oi[2] = 150000.0    # Put Wall at strike -8 steps (-0.8%)
                     
                     sigmas = np.full_like(strikes, 0.40)
                     
                     # Estimate dealer multipliers (-1.0 for short options walls)
                     multipliers = -np.ones_like(strikes)
+                    multipliers[2] = 1.0    # Dealers net long puts at index 2 to create Support Put Wall
                     
                     # Compute GEX Profile
                     gex_profile = mapper.calculate_gex_profile(

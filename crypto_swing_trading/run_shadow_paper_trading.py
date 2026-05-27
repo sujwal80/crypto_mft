@@ -41,7 +41,7 @@ class HistoricTickPlayer:
         self.symbol = symbol
         
         # Instantiate logic
-        self.state_machine = GexMicroStateMachine(symbol=self.symbol, mode="SHADOW")
+        self.state_machine = GexMicroStateMachine(symbol=self.symbol, mode="SHADOW", resample_ticks=20)
         self.mapper = GexMapper(model_type="COIN_MARGINED")
         
         # Memory states for GEX updates
@@ -96,7 +96,7 @@ class HistoricTickPlayer:
                     deribit_idx = self.state_machine.basis_tracker.deribit_index_price
                     if (self.state_machine.adjusted_target_price is None or 
                         deribit_idx is None or 
-                        abs(mid_price - deribit_idx) / deribit_idx > 0.015):
+                        abs(mid_price - deribit_idx) / deribit_idx > 0.05):
                         
                         strike_spacing = max(1.0, round(mid_price * 0.001, 1))
                         strikes = np_strikes = [round(mid_price + i * strike_spacing, 1) for i in range(-10, 11)]
@@ -105,11 +105,11 @@ class HistoricTickPlayer:
                         import numpy as np
                         call_oi = np.full_like(np_strikes, 10000.0)
                         put_oi = np.full_like(np_strikes, 10000.0)
-                        call_oi[14] = 150000.0  # Call Wall
-                        put_oi[6] = 150000.0    # Put Wall
+                        call_oi[18] = 150000.0  # Call Wall at strike +8 steps (0.8%)
+                        put_oi[2] = 150000.0    # Put Wall at strike -8 steps (-0.8%)
                         sigmas = np.full_like(np_strikes, 0.40)
                         multipliers = -np.ones_like(np_strikes)
-                        multipliers[6] = 1.0    # Dealers net long puts at index 6 to create Support Put Wall
+                        multipliers[2] = 1.0    # Dealers net long puts at index 2 to create Support Put Wall
                         
                         gex_profile = self.mapper.calculate_gex_profile(
                             spot_price=mid_price,
@@ -297,18 +297,18 @@ class HistoricTickPlayer:
             "trade_journal": trade_records
         }
         
-        report_path = "/Users/singhujwal/crypto_mft/shadow_paper_trading_report.json"
+        report_path = os.getenv("SHADOW_REPORT_PATH", "shadow_paper_trading_report.json")
         try:
             import json
             with open(report_path, "w") as f:
                 json.dump(report, f, indent=2)
-            logger.warning(f"📝 LLM-Ready Shadow Session Report saved successfully to: {report_path}")
+            logger.warning(f"📝 Shadow Session Report saved successfully to: {report_path}")
             logger.warning("================================================================================")
         except Exception as e:
             logger.error(f"Failed to save shadow session report: {e}")
 
 async def main():
-    file_path = "/Users/singhujwal/crypto_mft/datasets/futures_market_data_5days.log"
+    file_path = os.getenv("DATASET_PATH", "/Users/singhujwal/crypto_mft/datasets/real_market_data_5days.log")
     
     # Set up a historic ticker replayer running at configurable speed (defaults to infinity for backtests)
     speedup_env = os.getenv("SPEEDUP", "inf")

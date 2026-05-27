@@ -107,20 +107,21 @@ class SmartRouter:
             action = side.upper()
             ref_price = float(shadow_price)
             
-            # Execute as a Maker at the spread (Ask for Long exit selling, Bid for Short exit buying)
-            fill_price = ref_price + 0.5 if action == "SELL" else ref_price - 0.5
+            # Realistically model emergency invalidation exits as crossing the spread (Taker)
+            # Rather than assuming a Maker rebate/fill at the spread, apply slippage
+            fill_price = ref_price - 0.5 if action == "SELL" else ref_price + 0.5
             
-            # Optimized Exit Fee: maker optimized exit fee set to 0.1%
+            # Real-world Taker Exit Fee (0.1%) + Slippage
             fee = amount * fill_price * 0.001
             
             order = {
-                "order_id": f"shadow_maker_exit_{int(timestamp*1e6)}",
+                "order_id": f"shadow_taker_exit_{int(timestamp*1e6)}",
                 "symbol": symbol,
                 "side": action,
                 "price": fill_price,
                 "amount": amount,
                 "fee": fee,
-                "type": "LIMIT_POST_ONLY",  # Flipped to Maker Limit
+                "type": "MARKET",  # Flipped to Taker Market
                 "status": "FILLED",
                 "timestamp": timestamp
             }

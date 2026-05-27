@@ -69,7 +69,7 @@ class BarResampler:
             # Tick-based resampling takes absolute priority when prioritize_time is disabled
             if self.tick_counter >= self.duration_ticks:
                 is_completed = True
-        elif timestamp_ns is not None and self.prioritize_time:
+        elif self.prioritize_time:
             # Time-based resampling takes absolute priority when timestamps are available
             if now - self.last_bar_close_time >= self.duration_seconds:
                 is_completed = True
