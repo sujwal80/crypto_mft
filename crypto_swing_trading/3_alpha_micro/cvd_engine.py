@@ -69,25 +69,27 @@ class CumulativeVolumeDeltaEngine:
             return 1.0 if self.total_buy_volume == 0.0 else 100.0
         return self.total_buy_volume / self.total_sell_volume
 
-    def detect_absorption_divergence(self, price_change_pct: float, threshold_cvd_zscore: float = 2.0) -> bool:
+    def detect_absorption_divergence(self, 
+                                     price_change_pct: float, 
+                                     sell_threshold: float = 0.75, 
+                                     buy_threshold: float = 1.33) -> bool:
         """
         Detects passive absorption divergence:
-        e.g. CVD spikes intensely (> 2.0 Z-score or massive imbalance), 
-        but spot price refuses to advance (extremely flat or negative price change).
-        This is the absolute Sniper confirmation trigger for reversals!
+        e.g. CVD spikes intensely, but spot price refuses to advance (passive absorption).
+        Supports configurable thresholds to handle both raw ticks (0.3/3.0) and resampled bars (0.75/1.33).
         """
-        # If buy volume is vastly dominant but price did not rise, or vice versa
+        # If trade volume delta is negligible, no divergence is meaningful
         if abs(self.rolling_cvd) < 10.0:
             return False
             
         agg_ratio = self.get_aggression_ratio()
         
-        # Scenario A: Extreme Taker Selling (ratio < 0.3) but spot price remains flat or goes up (price_change_pct >= -0.05%)
-        if agg_ratio < 0.3 and price_change_pct >= -0.0005:
+        # Scenario A: Taker Selling dominant (ratio < sell_threshold) but price remains flat/rises (price_change_pct >= -0.05%)
+        if agg_ratio < sell_threshold and price_change_pct >= -0.0005:
             return True
             
-        # Scenario B: Extreme Taker Buying (ratio > 3.0) but spot price remains flat or goes down (price_change_pct <= 0.05%)
-        if agg_ratio > 3.0 and price_change_pct <= 0.0005:
+        # Scenario B: Taker Buying dominant (ratio > buy_threshold) but price remains flat/falls (price_change_pct <= 0.05%)
+        if agg_ratio > buy_threshold and price_change_pct <= 0.0005:
             return True
             
         return False

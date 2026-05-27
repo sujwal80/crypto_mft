@@ -47,7 +47,10 @@ class GexMicroStateMachine:
         # Perception/Micro Sensors (Armed in State 1)
         self.welford = WelfordRollingStats(window_size=1000)
         self.kalman = MicroPriceKalmanFilter(process_noise=1e-5, measurement_noise=1e-2)
-        self.cvd = CumulativeVolumeDeltaEngine(rolling_window_ticks=5000)
+        
+        # Resample-Aware CVD Window: 5000 ticks for HFT, 8 bars for resampled swing (rolling 8 minutes)
+        cvd_window = 5000 if self.resample_ticks == 1 else 8
+        self.cvd = CumulativeVolumeDeltaEngine(rolling_window_ticks=cvd_window)
         self.resampler = BarResampler(bar_duration_seconds=60, bar_duration_ticks=self.resample_ticks if self.resample_ticks > 1 else None, prioritize_time=self.prioritize_time)
         
         # Macro GEX Wall target state variables
@@ -238,9 +241,12 @@ class GexMicroStateMachine:
                 self.state = 1  # Revert to Armed to hunt again
             return
             
-        # 2. If no active order, evaluate entry confirmation matrix
-        is_long_confirmed = (z_score >= 2.0) and self.cvd.detect_absorption_divergence(0.0)
-        is_short_confirmed = (z_score <= -2.0) and self.cvd.detect_absorption_divergence(0.0)
+        # 2. If no active order, evaluate entry confirmation matrix with resample-aware thresholds
+        sell_th = 0.3 if self.resample_ticks == 1 else 0.75
+        buy_th = 3.0 if self.resample_ticks == 1 else 1.33
+        
+        is_long_confirmed = (z_score >= 0.8) and self.cvd.detect_absorption_divergence(0.0, sell_threshold=sell_th, buy_threshold=buy_th)
+        is_short_confirmed = (z_score <= -0.8) and self.cvd.detect_absorption_divergence(0.0, sell_threshold=sell_th, buy_threshold=buy_th)
         
         if is_long_confirmed:
             logger.info(f"CONFIRMED: Long reversal triggered at {mid_price:.2f}. Submitting maker order.")
