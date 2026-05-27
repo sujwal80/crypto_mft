@@ -2,9 +2,10 @@ import os
 import json
 import sys
 import time
+import glob
 import logging
 import numpy as np
-from typing import Optional
+from typing import List, Dict, Optional
 
 # Setup production paths
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -13,9 +14,9 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "4_execu
 
 from state_machine import GexMicroStateMachine
 
-# Setup logging to stdout
+# Setup logging
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.WARNING, # Suppress low-level info logs during batch runs to prevent console flooding
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 logger = logging.getLogger("OptionL2Backtester")
@@ -30,14 +31,10 @@ class OptionL2Backtester:
         self.file_path = file_path
         self.initial_capital = initial_capital
         
-        # Extract symbol from filename
         basename = os.path.basename(file_path)
-        # Example: 2026-05-26_BTC-5JUN26-64000-C-USDT.ob25
         self.symbol = basename.split("_")[-1].replace(".ob25", "")
         
-        logger.info(f"Initializing L2 Option Backtester for contract: {self.symbol}")
-        
-        # Instantiate Master State Machine (Setting prioritize_time=False to enforce tick-based simulation boundaries)
+        # Instantiate Master State Machine
         self.state_machine = GexMicroStateMachine(
             symbol=self.symbol,
             mode="SHADOW",
@@ -46,22 +43,17 @@ class OptionL2Backtester:
             prioritize_time=False
         )
         
-        # Initialize static GEX wall profile just below/above the option premium boundary to trigger snipers
+        # Initialize GEX wall profile near option premium boundary to trigger entries
         self.state_machine.update_gex_profile(
             key_strike=13000.0,
             gex_value=150.0,
             deribit_index=13000.0
         )
 
-    def start_simulation(self):
-        logger.warning("================================================================================")
-        logger.warning(f"🚀 STARTING LEVEL 2 OPTION CONTRACT BACKTEST SIMULATION")
-        logger.warning(f"Contract File: {os.path.basename(self.file_path)}")
-        logger.warning("================================================================================")
-        
-        # Local reconstructed L2 order book state
-        bids_book = {} # price_str -> size_float
-        asks_book = {} # price_str -> size_float
+    def start_simulation(self) -> Dict:
+        """Runs L2 chronological replay. Returns backtest results dict."""
+        bids_book = {} 
+        asks_book = {} 
         
         prev_bid_price = None
         prev_ask_price = None
@@ -69,7 +61,7 @@ class OptionL2Backtester:
         prev_ask_qty = 0.0
         
         line_count = 0
-        filled_trades = 0
+        mid_price = 0.0
         
         try:
             with open(self.file_path, "r") as f:
@@ -87,7 +79,7 @@ class OptionL2Backtester:
                     bids_data = data.get("b", [])
                     asks_data = data.get("a", [])
                     
-                    # 1. Update local reconstructed Bids orderbook state
+                    # Update reconstructed order book
                     for level in bids_data:
                         price_str = level[0]
                         qty = float(level[1])
@@ -96,7 +88,6 @@ class OptionL2Backtester:
                         else:
                             bids_book[price_str] = qty
                             
-                    # 2. Update local reconstructed Asks orderbook state
                     for level in asks_data:
                         price_str = level[0]
                         qty = float(level[1])
@@ -105,11 +96,9 @@ class OptionL2Backtester:
                         else:
                             asks_book[price_str] = qty
                             
-                    # If book is still warming up, wait
                     if not bids_book or not asks_book:
                         continue
                         
-                    # 3. Extract sorted Best Bids and Asks
                     sorted_bids = sorted([(float(p), q) for p, q in bids_book.items()], key=lambda x: x[0], reverse=True)
                     sorted_asks = sorted([(float(p), q) for p, q in asks_book.items()], key=lambda x: x[0])
                     
@@ -122,35 +111,31 @@ class OptionL2Backtester:
                     best_ask_qty = sorted_asks[0][1]
                     
                     mid_price = (best_bid_price + best_ask_price) / 2.0
-                    tick_ns = int(packet["ts"] * 1e6) # Decode Bybit ms epoch timestamp
+                    tick_ns = int(packet["ts"] * 1e6)
                     
-                    # 4. Microstructure Trade Inference logic for CVD mapping
                     is_inferred_trade = False
                     trade_price = 0.0
                     trade_qty = 0.0
                     is_buyer_maker = False
                     
                     if prev_bid_price is not None and prev_ask_price is not None:
-                        # Imbalance decreases at Bid price -> seller taker trade event
                         if best_bid_price == prev_bid_price and best_bid_qty < prev_bid_qty:
                             is_inferred_trade = True
                             trade_price = best_bid_price
                             trade_qty = prev_bid_qty - best_bid_qty
                             is_buyer_maker = True
-                        # Imbalance decreases at Ask price -> buyer taker trade event
                         elif best_ask_price == prev_ask_price and best_ask_qty < prev_ask_qty:
                             is_inferred_trade = True
                             trade_price = best_ask_price
                             trade_qty = prev_ask_qty - best_ask_qty
                             is_buyer_maker = False
                             
-                    # Update memory anchors
                     prev_bid_price = best_bid_price
                     prev_ask_price = best_ask_price
                     prev_bid_qty = best_bid_qty
                     prev_ask_qty = best_ask_qty
                     
-                    # 5. Feed Reconstructed Tick to the Master State Machine
+                    # Process tick
                     import asyncio
                     asyncio.run(self.state_machine.process_market_tick(
                         mid_price=mid_price,
@@ -163,9 +148,8 @@ class OptionL2Backtester:
                         timestamp_ns=tick_ns
                     ))
                     
-            # Force close out open position at the end to record stats
+            # Force close open swing positions
             if self.state_machine.in_position and mid_price > 0.0:
-                logger.warning("⏰ Final Closeout: Forcing market close of open option position at session end...")
                 exit_side = "SELL" if self.state_machine.position_side == "LONG" else "BUY"
                 asyncio.run(self.state_machine.smart_router.place_market_order(
                     symbol=self.symbol,
@@ -175,42 +159,105 @@ class OptionL2Backtester:
                 ))
                 self.state_machine.in_position = False
                 
-        except KeyboardInterrupt:
-            logger.warning("⚠️ Backtest manually interrupted.")
-        finally:
-            self._print_performance_report(line_count)
-
-    def _print_performance_report(self, ticks_processed: int):
-        journal = self.state_machine.smart_router.trade_journal
-        
-        print("\n================================================================================")
-        print("📊 LEVEL 2 OPTION CONTRACT SWING BACKTEST REPORT CARD")
-        print("================================================================================")
-        print(f"Contract Symbol       : {self.symbol}")
-        print(f"Total Ticks Processed : {ticks_processed:,}")
-        
-        if not journal:
-            print("⚠️ No trades were executed during this option backtest session.")
-            print("================================================================================\n")
-            return
+        except Exception as e:
+            logger.error(f"Error processing {self.symbol}: {e}")
             
-        cash = self.initial_capital
-        total_fees = 0.0
-        wins = 0
-        completed_trades = []
+        # Compile result dictionary
+        journal = self.state_machine.smart_router.trade_journal
+        return {
+            "symbol": self.symbol,
+            "ticks_processed": line_count,
+            "journal": journal
+        }
+
+# --------------------------------------------------------------------------------
+# Multi-Contract Portfolio Batch Backtest Runner
+# --------------------------------------------------------------------------------
+def run_portfolio_backtest(expiry_filter: Optional[str] = None, 
+                           strike_filter: Optional[float] = None, 
+                           type_filter: Optional[str] = None):
+    """
+    Scans all 5 ob25 datasets directories, filters contracts, 
+    runs chronological L2 backtests, and consolidates portfolio performance.
+    """
+    base_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "../datasets"))
+    ob25_dirs = sorted([d for d in os.listdir(base_dir) if d.endswith("_BTC_USDT.ob25") and os.path.isdir(os.path.join(base_dir, d))], reverse=True)
+    
+    all_files = []
+    for d in ob25_dirs:
+        all_files.extend(glob.glob(os.path.join(base_dir, d, "*.ob25")))
+        
+    filtered_files = []
+    
+    # Apply dynamic filters
+    for f in all_files:
+        basename = os.path.basename(f)
+        if "_BTC" not in basename:
+            continue
+            
+        try:
+            contract_suffix = basename.split("_BTC")[1]
+            parts = contract_suffix.split("-")
+            
+            expiry = parts[1]
+            strike = float(parts[2])
+            opt_type = parts[3]
+            
+            if expiry_filter and expiry_filter not in expiry:
+                continue
+            if strike_filter and strike_filter != strike:
+                continue
+            if type_filter and type_filter != opt_type:
+                continue
+                
+            filtered_files.append(f)
+        except Exception:
+            continue
+            
+    total_matched = len(filtered_files)
+    
+    print("================================================================================")
+    print("💼 MULTI-CONTRACT L2 OPTIONS PORTFOLIO BACKTEST RUNNER")
+    print("================================================================================")
+    print(f"   • Match Filters : Expiry={expiry_filter or 'ALL'} | Strike={strike_filter or 'ALL'} | Type={type_filter or 'ALL'}")
+    print(f"   • Matched Files : {total_matched} active contracts (from 5-day historical folders)")
+    print("================================================================================\n")
+    
+    if total_matched == 0:
+        print("⚠️ No option contracts matched your filters. Aborting run.")
+        return
+        
+    initial_capital_per_contract = 10000.0
+    total_initial_capital = total_matched * initial_capital_per_contract
+    total_final_balance = total_initial_capital
+    total_completed_trades = 0
+    total_wins = 0
+    aggregate_fees = 0.0
+    
+    trade_records = []
+    
+    # Sequential batch execution
+    for idx, f in enumerate(filtered_files):
+        sys.stdout.write(f"\r⚙️ Running Contract Backtest [{idx+1}/{total_matched}]: {os.path.basename(f)}...")
+        sys.stdout.flush()
+        
+        backtester = OptionL2Backtester(file_path=f, initial_capital=initial_capital_per_contract)
+        result = backtester.start_simulation()
+        
+        journal = result["journal"]
         active_pos = None
         
         for fill in journal:
-            total_fees += fill["fee"]
+            aggregate_fees += fill["fee"]
             
             if not active_pos:
                 active_pos = {
                     "entry_price": fill["price"],
                     "entry_fee": fill["fee"],
-                    "side": "LONG" if fill["side"] == "BUY" else "SHORT"
+                    "side": "LONG" if fill["side"] == "BUY" else "SHORT",
+                    "symbol": result["symbol"]
                 }
             else:
-                # Pairing exit
                 entry = active_pos["entry_price"]
                 exit = fill["price"]
                 side = active_pos["side"]
@@ -218,36 +265,52 @@ class OptionL2Backtester:
                 gross_pnl = (exit - entry) if side == "LONG" else (entry - exit)
                 net_pnl = gross_pnl - (active_pos["entry_fee"] + fill["fee"])
                 
-                completed_trades.append({
+                trade_records.append({
+                    "symbol": active_pos["symbol"],
                     "side": side,
                     "entry": entry,
                     "exit": exit,
                     "net_pnl": net_pnl
                 })
                 
-                cash += net_pnl
+                total_final_balance += net_pnl
+                total_completed_trades += 1
                 if net_pnl > 0:
-                    wins += 1
+                    total_wins += 1
                 active_pos = None
                 
-        win_rate = (wins / len(completed_trades)) * 100.0 if completed_trades else 0.0
-        net_percentage = ((cash - self.initial_capital) / self.initial_capital) * 100.0
+    print("\n\n================================================================================")
+    print("📊 CONSOLIDATED 5-DAY L2 OPTIONS PORTFOLIO REPORT CARD")
+    print("================================================================================")
+    print(f"Total Contracts Tested : {total_matched}")
+    print(f"Total Completed Trades : {total_completed_trades}")
+    
+    if total_completed_trades > 0:
+        win_rate = (total_wins / total_completed_trades) * 100.0
+        print(f"Portfolio Win Rate     : {win_rate:.2f}%")
+    else:
+        print("Portfolio Win Rate     : 0.00%")
         
-        print(f"Completed Trades      : {len(completed_trades)}")
-        print(f"Win Rate              : {win_rate:.2f}%")
-        print(f"Total Exchange Fees   : ${total_fees:.2f}")
-        print(f"Initial Portfolio     : ${self.initial_capital:,.2f}")
-        print(f"Final Portfolio       : ${cash:,.2f}")
-        print(f"Net Return            : ${cash - self.initial_capital:+.2f} ({net_percentage:+.2f}%)")
-        print("-" * 80)
-        
-        for i, t in enumerate(completed_trades):
-            print(f"   Trade {i+1}: {t['side']} | Entry: ${t['entry']:.2f} | Exit: ${t['exit']:.2f} | Net PnL: {t['net_pnl']:+.2f}")
+    print(f"Aggregate Fees Paid    : ${aggregate_fees:.2f}")
+    print(f"Initial Portfolio Cap  : ${total_initial_capital:,.2f}")
+    print(f"Final Portfolio Balance: ${total_final_balance:,.2f}")
+    
+    net_percentage = ((total_final_balance - total_initial_capital) / total_initial_capital) * 100.0
+    print(f"Net Portfolio Return   : ${total_final_balance - total_initial_capital:+.2f} ({net_percentage:+.2f}%)")
+    print("================================================================================\n")
+    
+    # Print top executed trade highlights if any occurred
+    if trade_records:
+        print("📝 EXECUTED SWING TRADE RECORD HIGHLIGHTS (Sorted by PnL):")
+        sorted_trades = sorted(trade_records, key=lambda x: x["net_pnl"], reverse=True)
+        for i, t in enumerate(sorted_trades[:10]): # Limit to top 10 highlights
+            print(f"   Highlight {i+1}: {t['symbol']} | {t['side']} | Entry: ${t['entry']:.2f} | Exit: ${t['exit']:.2f} | Net PnL: {t['net_pnl']:+.2f}")
         print("================================================================================\n")
 
 if __name__ == "__main__":
-    target_file = "/Users/singhujwal/crypto_mft/datasets/2026-05-26_BTC_USDT.ob25/2026-05-26_BTC-5JUN26-64000-C-USDT.ob25"
-    
-    # Run simulation
-    backtester = OptionL2Backtester(file_path=target_file)
-    backtester.start_simulation()
+    # Quick programmatic focus: Backtest all $64,000 strike Call/Put contracts across the 5 days!
+    # (Perfect for fast validation testing over specific high-probability strikes!)
+    run_portfolio_backtest(
+        expiry_filter="5JUN26",
+        strike_filter=64000.0
+    )
