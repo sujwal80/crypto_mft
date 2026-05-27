@@ -1,1 +1,0 @@
-# Make backtester a package

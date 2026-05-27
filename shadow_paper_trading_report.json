@@ -1,0 +1,47 @@
+{
+  "session_metrics": {
+    "initial_capital": 10000.0,
+    "final_balance": 7445.750599999999,
+    "net_pnl": -2554.2494000000006,
+    "net_percentage_return": -25.542494000000005,
+    "total_trades": 3,
+    "win_rate": 0.0,
+    "total_fees_paid": 458.24940000000004,
+    "ticks_processed": 28800
+  },
+  "trade_journal": [
+    {
+      "trade_id": 1,
+      "side": "LONG",
+      "entry_price": 76794.3,
+      "entry_fee": 76.7943,
+      "exit_price": 76049.4,
+      "exit_fee": 76.04939999999999,
+      "gross_pnl": -744.9000000000087,
+      "net_pnl": -897.7437000000087,
+      "duration_seconds": 0.004037141799926758
+    },
+    {
+      "trade_id": 2,
+      "side": "LONG",
+      "entry_price": 76857.2,
+      "entry_fee": 76.85719999999999,
+      "exit_price": 76199.8,
+      "exit_fee": 76.19980000000001,
+      "gross_pnl": -657.3999999999942,
+      "net_pnl": -810.4569999999942,
+      "duration_seconds": 0.017472028732299805
+    },
+    {
+      "trade_id": 3,
+      "side": "LONG",
+      "entry_price": 76521.2,
+      "entry_fee": 76.5212,
+      "exit_price": 75827.5,
+      "exit_fee": 75.8275,
+      "gross_pnl": -693.6999999999971,
+      "net_pnl": -846.0486999999971,
+      "duration_seconds": 0.050112009048461914
+    }
+  ]
+}
